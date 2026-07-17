@@ -1,20 +1,36 @@
+from datetime import date as date_cls
+
 from langchain.tools import tool
 
-from src.utils import load_profile, save_health_log
+from src.utils import load_profile, save_event_log
+
+
+def _today() -> str:
+    return date_cls.today().isoformat()
 
 
 @tool
-def log_blood_pressure(bp_value: float) -> str:
-    """Log the user's blood pressure reading (mmHg, e.g. the systolic number)."""
-    save_health_log(bp=bp_value)
-    return f"已記錄血壓 {bp_value} mmHg。"
+def log_blood_pressure(systolic: float, diastolic: float) -> str:
+    """Log the user's blood pressure reading (systolic/diastolic, mmHg) for today.
+    Appears immediately in their 紀錄 (Records) tab BP trend chart."""
+    save_event_log("bp_reading", {"date": _today(), "sys": systolic, "dia": diastolic})
+    return f"已經幫你記錄咗今日血壓 {systolic}/{diastolic} mmHg，會顯示喺「紀錄」入面。"
 
 
 @tool
-def log_glucose(glucose_value: float) -> str:
-    """Log the user's blood glucose reading (mmol/L)."""
-    save_health_log(glucose=glucose_value)
-    return f"已記錄血糖 {glucose_value} mmol/L。"
+def log_glucose(value: float) -> str:
+    """Log the user's blood glucose reading (mmol/L) for today.
+    Appears immediately in their 紀錄 (Records) tab."""
+    save_event_log("glucose_reading", {"date": _today(), "value": value})
+    return f"已經幫你記錄咗今日血糖 {value} mmol/L，會顯示喺「紀錄」入面。"
+
+
+@tool
+def log_hba1c(value: float) -> str:
+    """Log the user's HbA1c (糖化血紅蛋白) reading as a percentage for today.
+    Appears immediately in their 紀錄 (Records) tab HbA1c trend chart."""
+    save_event_log("hba1c_reading", {"date": _today(), "value": value})
+    return f"已經幫你記錄咗今日HbA1c {value}%，會顯示喺「紀錄」入面。"
 
 
 @tool

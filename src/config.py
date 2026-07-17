@@ -23,6 +23,5 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 DATA_DIR = PROJECT_ROOT / "data"
 CHROMA_DIR = PROJECT_ROOT / "chroma_db"
-HEALTH_LOG_PATH = DATA_DIR / "health_logs.jsonl"
 PROFILE_PATH = PROJECT_ROOT / "user_profile.json"
 EVAL_REPORT_PATH = PROJECT_ROOT / "eval" / "results" / "latest.json"

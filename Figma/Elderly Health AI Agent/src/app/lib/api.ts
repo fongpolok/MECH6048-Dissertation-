@@ -3,8 +3,21 @@
 // whether to fall back to offline/demo behavior — this is an elderly health
 // app, so a flaky network must never block the emergency (SOS) UI.
 
+// Defaults to whatever host the page itself was loaded from, on port 8000 —
+// this makes "open the app from an iPhone on the same Wi-Fi" work without any
+// rebuild: the phone loads http://<mac-lan-ip>:5173, so it also talks to
+// http://<mac-lan-ip>:8000 automatically. VITE_API_URL still wins when set
+// (Docker/production deploys, where frontend and backend aren't on the same
+// LAN-reachable host).
+function defaultApiBaseUrl(): string {
+  if (typeof window !== "undefined" && window.location?.hostname) {
+    return `http://${window.location.hostname}:8000`;
+  }
+  return "http://localhost:8000";
+}
+
 export const API_BASE_URL: string =
-  (import.meta as any).env?.VITE_API_URL ?? "http://localhost:8000";
+  (import.meta as any).env?.VITE_API_URL ?? defaultApiBaseUrl();
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
@@ -20,7 +33,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export type ChatTurn = { role: "user" | "agent"; text: string };
 
-export type ChatResponse = { reply: string; sources: string[] };
+export type ChatResponse = { reply: string; sources: string[]; is_emergency: boolean };
 
 export function sendChatMessage(message: string, history: ChatTurn[]): Promise<ChatResponse> {
   return request<ChatResponse>("/api/chat", {
@@ -54,25 +67,48 @@ export function checkHealth(): Promise<{ status: string }> {
   return request("/api/health");
 }
 
-// ── Health records (血壓/HbA1c trend tracking in the 記錄 tab) ─────────────────
+// ── Health records (血壓/血糖/HbA1c daily tracking in the 記錄 tab) ─────────────
+// `id` is set once the backend has persisted the entry — used to tell "new
+// entry" (POST) apart from "amend existing entry" (PATCH) in the UI.
 
-export type BPRecord = { date: string; sys: number; dia: number };
-export type HbA1cRecord = { date: string; value: number };
+export type BPRecord = { id?: string; date: string; sys: number; dia: number };
+export type GlucoseRecord = { id?: string; date: string; value: number };
+export type HbA1cRecord = { id?: string; date: string; value: number };
 
-export function logBPRecord(entry: BPRecord): Promise<unknown> {
-  return request("/api/records/bp", { method: "POST", body: JSON.stringify(entry) });
+export function logBPRecord(entry: BPRecord): Promise<BPRecord> {
+  return request<BPRecord>("/api/records/bp", { method: "POST", body: JSON.stringify(entry) });
 }
 
 export function getBPRecords(): Promise<BPRecord[]> {
   return request<BPRecord[]>("/api/records/bp");
 }
 
-export function logHbA1cRecord(entry: HbA1cRecord): Promise<unknown> {
-  return request("/api/records/hba1c", { method: "POST", body: JSON.stringify(entry) });
+export function amendBPRecord(id: string, patch: Partial<BPRecord>): Promise<BPRecord> {
+  return request<BPRecord>(`/api/records/bp/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
+}
+
+export function logGlucoseRecord(entry: GlucoseRecord): Promise<GlucoseRecord> {
+  return request<GlucoseRecord>("/api/records/glucose", { method: "POST", body: JSON.stringify(entry) });
+}
+
+export function getGlucoseRecords(): Promise<GlucoseRecord[]> {
+  return request<GlucoseRecord[]>("/api/records/glucose");
+}
+
+export function amendGlucoseRecord(id: string, patch: Partial<GlucoseRecord>): Promise<GlucoseRecord> {
+  return request<GlucoseRecord>(`/api/records/glucose/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
+}
+
+export function logHbA1cRecord(entry: HbA1cRecord): Promise<HbA1cRecord> {
+  return request<HbA1cRecord>("/api/records/hba1c", { method: "POST", body: JSON.stringify(entry) });
 }
 
 export function getHbA1cRecords(): Promise<HbA1cRecord[]> {
   return request<HbA1cRecord[]>("/api/records/hba1c");
+}
+
+export function amendHbA1cRecord(id: string, patch: Partial<HbA1cRecord>): Promise<HbA1cRecord> {
+  return request<HbA1cRecord>(`/api/records/hba1c/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 }
 
 // Mirrors the report shape written by eval/evaluate.py (src/api.py just reads

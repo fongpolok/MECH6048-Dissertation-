@@ -13,15 +13,56 @@ import {
 } from "recharts";
 import {
   sendChatMessage, logMedication, alertCaregiver,
-  logBPRecord, getBPRecords, logHbA1cRecord, getHbA1cRecords,
+  logBPRecord, getBPRecords, amendBPRecord,
+  logGlucoseRecord, getGlucoseRecords, amendGlucoseRecord,
+  logHbA1cRecord, getHbA1cRecords, amendHbA1cRecord,
   getEvalReport, type ChatTurn, type EvalReport,
 } from "./lib/api";
 
 type Tab = "home" | "chat" | "medications" | "records" | "consult" | "settings" | "eval";
-type Message = { id: string; role: "user" | "agent"; text: string; time: string };
+type Message = { id: string; role: "user" | "agent"; text: string; time: string; isEmergency?: boolean };
 type Profile = { name: string; age: string; gender: "男" | "女" | "" };
-type BPEntry = { date: string; sys: number; dia: number };
-type HbA1cEntry = { date: string; value: number };
+type BPEntry = { id?: string; date: string; sys: number; dia: number };
+type GlucoseEntry = { id?: string; date: string; value: number };
+type HbA1cEntry = { id?: string; date: string; value: number };
+
+// Same heuristic the backend uses (src/api.py _is_emergency_reply) — kept in
+// sync so the offline/demo fallback path (no backend reachable) still
+// surfaces the same inline emergency action button. Checks position, not
+// just presence: the system prompt requires leading with "call 999" for
+// red-flag symptoms, so a genuine emergency reply has it near the very
+// start — a routine answer that merely closes with "if anything feels wrong,
+// call 999" as a general safety reminder should NOT trigger the button.
+function isEmergencyReply(text: string): boolean {
+  const idx = text.indexOf("999");
+  return idx >= 0 && idx <= 80;
+}
+
+// On a real phone (opened from an iPhone over LAN, or added to the Home
+// Screen), the decorative "iPhone mockup" frame + fake status bar/dynamic
+// island would double up with the device's own chrome. Only show the mockup
+// frame on a desktop-sized viewport, where it's the intended preview effect.
+function useIsRealMobileDevice(): boolean {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 430px)");
+    const update = () => setIsMobile(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+  return isMobile;
+}
+
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function daysAgoISO(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
 
 const evalCategoryLabels: Record<string, string> = {
   grounded_fact: "資料準確度 (Grounded Facts)",
@@ -73,21 +114,35 @@ const medications = [
   { name: "依那普利", english: "Enalapril 10mg", time: "晚上 8:00", note: "血壓藥", color: "#007AFF", initially: false },
 ];
 
+// Daily granularity now — 記錄 tracks day-by-day, not month-by-month. These
+// bundled series are only the first-run placeholder; getBPRecords()/
+// getGlucoseRecords()/getHbA1cRecords() replace them with real history once
+// the backend has any (see the hydration effect below).
 const defaultBP: BPEntry[] = [
-  { date: "1月", sys: 148, dia: 92 },
-  { date: "2月", sys: 142, dia: 88 },
-  { date: "3月", sys: 138, dia: 86 },
-  { date: "4月", sys: 135, dia: 84 },
-  { date: "5月", sys: 132, dia: 82 },
-  { date: "6月", sys: 128, dia: 80 },
-  { date: "7月", sys: 130, dia: 81 },
+  { date: daysAgoISO(6), sys: 138, dia: 88 },
+  { date: daysAgoISO(5), sys: 135, dia: 86 },
+  { date: daysAgoISO(4), sys: 133, dia: 85 },
+  { date: daysAgoISO(3), sys: 129, dia: 82 },
+  { date: daysAgoISO(2), sys: 131, dia: 83 },
+  { date: daysAgoISO(1), sys: 127, dia: 80 },
+  { date: todayISO(), sys: 130, dia: 81 },
+];
+
+const defaultGlucose: GlucoseEntry[] = [
+  { date: daysAgoISO(6), value: 7.2 },
+  { date: daysAgoISO(5), value: 6.8 },
+  { date: daysAgoISO(4), value: 7.5 },
+  { date: daysAgoISO(3), value: 6.4 },
+  { date: daysAgoISO(2), value: 6.9 },
+  { date: daysAgoISO(1), value: 6.1 },
+  { date: todayISO(), value: 6.5 },
 ];
 
 const defaultHbA1c: HbA1cEntry[] = [
-  { date: "1月", value: 8.2 },
-  { date: "3月", value: 7.8 },
-  { date: "5月", value: 7.4 },
-  { date: "7月", value: 7.1 },
+  { date: daysAgoISO(180), value: 8.2 },
+  { date: daysAgoISO(120), value: 7.8 },
+  { date: daysAgoISO(60), value: 7.4 },
+  { date: daysAgoISO(3), value: 7.1 },
 ];
 
 const doctors = [
@@ -298,32 +353,40 @@ function OnboardingPage({ onDone }: { onDone: (p: Profile) => void }) {
 }
 
 // ── Add BP Modal ──────────────────────────────────────────────────────────────
-function AddBPModal({ onAdd, onClose }: { onAdd: (e: BPEntry) => void; onClose: () => void }) {
-  const [sys, setSys] = useState("");
-  const [dia, setDia] = useState("");
-  const months = ["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
-  const [month, setMonth] = useState(months[new Date().getMonth()]);
-  const valid = sys.trim() && dia.trim() && Number(sys) > 0 && Number(dia) > 0;
+// Shared date field — used by all three record modals. Defaults to today,
+// but can be backdated (e.g. logging yesterday's reading you forgot).
+function DateField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <p className="text-[13px] font-semibold uppercase mb-1 px-1" style={{ color: "#8E8E93", letterSpacing: "0.04em" }}>日期</p>
+      <div className="bg-[#F2F2F7] rounded-[12px] px-4 py-3">
+        <input
+          type="date"
+          className="w-full text-[17px] text-foreground bg-transparent outline-none"
+          value={value}
+          max={todayISO()}
+          onChange={e => onChange(e.target.value)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function BPModal({ initial, onSave, onClose }: { initial?: BPEntry; onSave: (e: BPEntry) => void; onClose: () => void }) {
+  const isEdit = !!initial;
+  const [date, setDate] = useState(initial?.date ?? todayISO());
+  const [sys, setSys] = useState(initial ? String(initial.sys) : "");
+  const [dia, setDia] = useState(initial ? String(initial.dia) : "");
+  const valid = date && sys.trim() && dia.trim() && Number(sys) > 0 && Number(dia) > 0;
   return (
     <div className="absolute inset-0 z-40 flex flex-col justify-end bg-black/50 backdrop-blur-sm">
       <div className="bg-card rounded-t-[20px] px-6 pt-5 pb-8">
         <div className="flex items-center justify-between mb-5">
-          <h3 className="text-[20px] font-bold text-foreground">新增血壓記錄</h3>
+          <h3 className="text-[20px] font-bold text-foreground">{isEdit ? "修改血壓記錄" : "新增血壓記錄"}</h3>
           <button onClick={onClose}><X className="w-6 h-6" style={{ color: "#8E8E93" }} /></button>
         </div>
         <div className="space-y-4">
-          <div>
-            <p className="text-[13px] font-semibold uppercase mb-1 px-1" style={{ color: "#8E8E93", letterSpacing: "0.04em" }}>月份</p>
-            <div className="flex gap-2 flex-wrap">
-              {months.slice(0, 7).map(m => (
-                <button key={m} onClick={() => setMonth(m)}
-                  className="px-3 py-1.5 rounded-full text-[13px] font-semibold transition-all"
-                  style={{ backgroundColor: month === m ? "#007AFF" : "#F2F2F7", color: month === m ? "#fff" : "#000" }}>
-                  {m}
-                </button>
-              ))}
-            </div>
-          </div>
+          <DateField value={date} onChange={setDate} />
           <div className="grid grid-cols-2 gap-3">
             <div>
               <p className="text-[13px] font-semibold uppercase mb-1 px-1" style={{ color: "#8E8E93", letterSpacing: "0.04em" }}>收縮壓 (mmHg)</p>
@@ -342,44 +405,68 @@ function AddBPModal({ onAdd, onClose }: { onAdd: (e: BPEntry) => void; onClose: 
           </div>
         </div>
         <button
-          onClick={() => { if (valid) { onAdd({ date: month, sys: Number(sys), dia: Number(dia) }); onClose(); } }}
+          onClick={() => { if (valid) { onSave({ id: initial?.id, date, sys: Number(sys), dia: Number(dia) }); onClose(); } }}
           disabled={!valid}
           className="w-full py-4 rounded-[14px] text-white text-[17px] font-semibold mt-5 disabled:opacity-40 transition-opacity"
           style={{ backgroundColor: "#007AFF" }}
         >
-          儲存記錄
+          {isEdit ? "更新記錄" : "儲存記錄"}
         </button>
       </div>
     </div>
   );
 }
 
-// ── Add HbA1c Modal ───────────────────────────────────────────────────────────
-function AddHbA1cModal({ onAdd, onClose }: { onAdd: (e: HbA1cEntry) => void; onClose: () => void }) {
-  const [val, setVal] = useState("");
-  const months = ["1月","3月","5月","7月","9月","11月"];
-  const [month, setMonth] = useState(months[0]);
-  const valid = val.trim() && Number(val) > 0;
+function GlucoseModal({ initial, onSave, onClose }: { initial?: GlucoseEntry; onSave: (e: GlucoseEntry) => void; onClose: () => void }) {
+  const isEdit = !!initial;
+  const [date, setDate] = useState(initial?.date ?? todayISO());
+  const [val, setVal] = useState(initial ? String(initial.value) : "");
+  const valid = date && val.trim() && Number(val) > 0;
   return (
     <div className="absolute inset-0 z-40 flex flex-col justify-end bg-black/50 backdrop-blur-sm">
       <div className="bg-card rounded-t-[20px] px-6 pt-5 pb-8">
         <div className="flex items-center justify-between mb-5">
-          <h3 className="text-[20px] font-bold text-foreground">新增 HbA1c 記錄</h3>
+          <h3 className="text-[20px] font-bold text-foreground">{isEdit ? "修改血糖記錄" : "新增血糖記錄"}</h3>
           <button onClick={onClose}><X className="w-6 h-6" style={{ color: "#8E8E93" }} /></button>
         </div>
         <div className="space-y-4">
+          <DateField value={date} onChange={setDate} />
           <div>
-            <p className="text-[13px] font-semibold uppercase mb-1 px-1" style={{ color: "#8E8E93", letterSpacing: "0.04em" }}>月份</p>
-            <div className="flex gap-2 flex-wrap">
-              {months.map(m => (
-                <button key={m} onClick={() => setMonth(m)}
-                  className="px-3 py-1.5 rounded-full text-[13px] font-semibold transition-all"
-                  style={{ backgroundColor: month === m ? "#FF9500" : "#F2F2F7", color: month === m ? "#fff" : "#000" }}>
-                  {m}
-                </button>
-              ))}
+            <p className="text-[13px] font-semibold uppercase mb-1 px-1" style={{ color: "#8E8E93", letterSpacing: "0.04em" }}>血糖 (mmol/L)</p>
+            <div className="bg-[#F2F2F7] rounded-[12px] px-4 py-3">
+              <input className="w-full text-[17px] text-foreground bg-transparent outline-none placeholder:text-[#C7C7CC]"
+                placeholder="例：6.5" type="number" inputMode="decimal" step="0.1" value={val} onChange={e => setVal(e.target.value)} />
             </div>
+            <p className="text-[13px] mt-1.5 px-1" style={{ color: "#8E8E93" }}>目標：空腹 4.0 – 7.0 mmol/L</p>
           </div>
+        </div>
+        <button
+          onClick={() => { if (valid) { onSave({ id: initial?.id, date, value: Number(val) }); onClose(); } }}
+          disabled={!valid}
+          className="w-full py-4 rounded-[14px] text-white text-[17px] font-semibold mt-5 disabled:opacity-40 transition-opacity"
+          style={{ backgroundColor: "#5AC8FA" }}
+        >
+          {isEdit ? "更新記錄" : "儲存記錄"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function HbA1cModal({ initial, onSave, onClose }: { initial?: HbA1cEntry; onSave: (e: HbA1cEntry) => void; onClose: () => void }) {
+  const isEdit = !!initial;
+  const [date, setDate] = useState(initial?.date ?? todayISO());
+  const [val, setVal] = useState(initial ? String(initial.value) : "");
+  const valid = date && val.trim() && Number(val) > 0;
+  return (
+    <div className="absolute inset-0 z-40 flex flex-col justify-end bg-black/50 backdrop-blur-sm">
+      <div className="bg-card rounded-t-[20px] px-6 pt-5 pb-8">
+        <div className="flex items-center justify-between mb-5">
+          <h3 className="text-[20px] font-bold text-foreground">{isEdit ? "修改 HbA1c 記錄" : "新增 HbA1c 記錄"}</h3>
+          <button onClick={onClose}><X className="w-6 h-6" style={{ color: "#8E8E93" }} /></button>
+        </div>
+        <div className="space-y-4">
+          <DateField value={date} onChange={setDate} />
           <div>
             <p className="text-[13px] font-semibold uppercase mb-1 px-1" style={{ color: "#8E8E93", letterSpacing: "0.04em" }}>HbA1c 數值 (%)</p>
             <div className="bg-[#F2F2F7] rounded-[12px] px-4 py-3">
@@ -390,12 +477,12 @@ function AddHbA1cModal({ onAdd, onClose }: { onAdd: (e: HbA1cEntry) => void; onC
           </div>
         </div>
         <button
-          onClick={() => { if (valid) { onAdd({ date: month, value: Number(val) }); onClose(); } }}
+          onClick={() => { if (valid) { onSave({ id: initial?.id, date, value: Number(val) }); onClose(); } }}
           disabled={!valid}
           className="w-full py-4 rounded-[14px] text-white text-[17px] font-semibold mt-5 disabled:opacity-40 transition-opacity"
           style={{ backgroundColor: "#FF9500" }}
         >
-          儲存記錄
+          {isEdit ? "更新記錄" : "儲存記錄"}
         </button>
       </div>
     </div>
@@ -411,6 +498,15 @@ function BPTooltip({ active, payload, label }: { active?: boolean; payload?: {va
       {payload.map(p => (
         <p key={p.name} className="text-[13px] font-bold" style={{ color: p.color }}>{p.name}: {p.value} mmHg</p>
       ))}
+    </div>
+  );
+}
+function GlucoseTooltip({ active, payload, label }: { active?: boolean; payload?: {value:number}[]; label?: string }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="bg-card rounded-[10px] px-3 py-2 shadow-lg" style={{ boxShadow: "0 4px 20px rgba(0,0,0,0.12)" }}>
+      <p className="text-[12px] font-semibold mb-1" style={{ color: "#8E8E93" }}>{label}</p>
+      <p className="text-[13px] font-bold" style={{ color: "#5AC8FA" }}>血糖: {payload[0].value} mmol/L</p>
     </div>
   );
 }
@@ -637,9 +733,13 @@ export default function App() {
   const [listening, setListening] = useState(false);
   const [booked, setBooked] = useState<string | null>(null);
   const [bpData, setBpData] = useState<BPEntry[]>(defaultBP);
+  const [glucoseData, setGlucoseData] = useState<GlucoseEntry[]>(defaultGlucose);
   const [hbData, setHbData] = useState<HbA1cEntry[]>(defaultHbA1c);
-  const [showAddBP, setShowAddBP] = useState(false);
-  const [showAddHb, setShowAddHb] = useState(false);
+  // Modal state doubles as "add" vs "amend": "new" opens a blank form, an
+  // entry object opens it pre-filled for editing, null keeps it closed.
+  const [bpModal, setBpModal] = useState<BPEntry | "new" | null>(null);
+  const [glucoseModal, setGlucoseModal] = useState<GlucoseEntry | "new" | null>(null);
+  const [hbModal, setHbModal] = useState<HbA1cEntry | "new" | null>(null);
   const [evalReport, setEvalReport] = useState<EvalReport | null>(null);
   const [evalLoading, setEvalLoading] = useState(false);
   const [evalError, setEvalError] = useState<string | null>(null);
@@ -648,13 +748,41 @@ export default function App() {
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, typing]);
 
-  // Hydrate real BP/HbA1c history from the backend once, on load — falls back
-  // to the bundled demo series (defaultBP/defaultHbA1c) if the backend has no
-  // records yet or is unreachable.
+  // Hydrate real BP/glucose/HbA1c history from the backend once, on load —
+  // falls back to the bundled demo series if the backend has no records yet
+  // or is unreachable.
   useEffect(() => {
     getBPRecords().then(records => { if (records.length > 0) setBpData(records); }).catch(() => {});
+    getGlucoseRecords().then(records => { if (records.length > 0) setGlucoseData(records); }).catch(() => {});
     getHbA1cRecords().then(records => { if (records.length > 0) setHbData(records); }).catch(() => {});
   }, []);
+
+  // Save a new record (POST) or amend an existing one (PATCH, when it has an
+  // id). Reflects the change locally even if the backend call fails, so the
+  // UI never feels broken — logMedication/submitWellness follow the same
+  // fire-and-forget-but-still-update-locally pattern elsewhere in this file.
+  async function upsertRecord<T extends { id?: string; date: string }>(
+    entry: T,
+    setData: React.Dispatch<React.SetStateAction<T[]>>,
+    create: (e: T) => Promise<T>,
+    amend: (id: string, patch: Partial<T>) => Promise<T>,
+  ) {
+    try {
+      const saved = entry.id ? await amend(entry.id, entry) : await create(entry);
+      setData(prev => {
+        const idx = entry.id ? prev.findIndex(r => r.id === entry.id) : -1;
+        if (idx >= 0) { const next = [...prev]; next[idx] = saved; return next; }
+        return [...prev, saved];
+      });
+    } catch (err) {
+      console.error("Failed to sync record", err);
+      setData(prev => {
+        const idx = entry.id ? prev.findIndex(r => r.id === entry.id) : -1;
+        if (idx >= 0) { const next = [...prev]; next[idx] = entry; return next; }
+        return [...prev, entry];
+      });
+    }
+  }
 
   async function loadEvalReport() {
     setEvalLoading(true);
@@ -704,13 +832,14 @@ export default function App() {
     setInput("");
     setTyping(true);
     try {
-      const { reply } = await sendChatMessage(content, history);
-      setMessages(p => [...p, { id: (Date.now() + 1).toString(), role: "agent", text: reply, time: now }]);
+      const { reply, is_emergency } = await sendChatMessage(content, history);
+      setMessages(p => [...p, { id: (Date.now() + 1).toString(), role: "agent", text: reply, time: now, isEmergency: is_emergency }]);
     } catch (err) {
       // Backend/Ollama unreachable — fall back to the local offline demo responses
       // so the app (and especially the emergency-symptom flow) never goes silent.
       console.error("Chat API unavailable, using offline demo response", err);
-      setMessages(p => [...p, { id: (Date.now() + 1).toString(), role: "agent", text: getAgentResponse(content), time: now }]);
+      const fallback = getAgentResponse(content);
+      setMessages(p => [...p, { id: (Date.now() + 1).toString(), role: "agent", text: fallback, time: now, isEmergency: isEmergencyReply(fallback) }]);
     } finally {
       setTyping(false);
     }
@@ -718,21 +847,30 @@ export default function App() {
 
   const takenCount = Object.values(taken).filter(Boolean).length;
   const latestBP = bpData[bpData.length - 1];
+  const latestGlucose = glucoseData[glucoseData.length - 1];
   const latestHb = hbData[hbData.length - 1];
   const bpStatus = latestBP.sys < 130 && latestBP.dia < 80 ? { label: "正常", color: "#34C759" } : latestBP.sys >= 140 ? { label: "偏高", color: "#FF3B30" } : { label: "輕微偏高", color: "#FF9500" };
+  const glucoseStatus = latestGlucose.value >= 4.0 && latestGlucose.value <= 7.0 ? { label: "正常", color: "#34C759" } : latestGlucose.value < 4.0 ? { label: "偏低", color: "#FF3B30" } : { label: "偏高", color: "#FF9500" };
   const hbStatus = latestHb.value < 7 ? { label: "達標", color: "#34C759" } : latestHb.value < 8 ? { label: "輕微偏高", color: "#FF9500" } : { label: "偏高", color: "#FF3B30" };
 
   const displayName = profile?.name ?? "用戶";
+  const isMobile = useIsRealMobileDevice();
 
   return (
-    <div className="size-full flex items-center justify-center bg-[#1C1C1E]">
+    <div className={isMobile ? "size-full" : "size-full flex items-center justify-center bg-[#1C1C1E]"}>
       <div className="relative flex flex-col overflow-hidden bg-background"
-        style={{ width: "min(390px, 100%)", height: "min(844px, 100%)", borderRadius: "min(55px, 8vw)", boxShadow: "0 0 0 10px #1C1C1E, 0 40px 80px rgba(0,0,0,0.8), inset 0 0 0 1px rgba(255,255,255,0.12)" }}>
+        style={isMobile
+          ? { width: "100%", height: "100%" }
+          : { width: "min(390px, 100%)", height: "min(844px, 100%)", borderRadius: "min(55px, 8vw)", boxShadow: "0 0 0 10px #1C1C1E, 0 40px 80px rgba(0,0,0,0.8), inset 0 0 0 1px rgba(255,255,255,0.12)" }
+        }>
 
-        {/* Dynamic island */}
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 w-[120px] h-[35px] bg-black rounded-full z-50" />
-
-        <StatusBar />
+        {!isMobile && (
+          <>
+            {/* Dynamic island */}
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 w-[120px] h-[35px] bg-black rounded-full z-50" />
+            <StatusBar />
+          </>
+        )}
 
         {/* ── Onboarding ── */}
         {!profile && <OnboardingPage onDone={p => {
@@ -789,23 +927,26 @@ export default function App() {
               </div>
             )}
 
-            {/* Add BP / HbA1c modals */}
-            {showAddBP && (
-              <AddBPModal
-                onAdd={e => {
-                  setBpData(p => [...p, e]);
-                  logBPRecord(e).catch(err => console.error("Failed to sync BP record", err));
-                }}
-                onClose={() => setShowAddBP(false)}
+            {/* Add/amend BP, glucose, HbA1c modals */}
+            {bpModal && (
+              <BPModal
+                initial={bpModal === "new" ? undefined : bpModal}
+                onSave={e => upsertRecord(e, setBpData, logBPRecord, amendBPRecord)}
+                onClose={() => setBpModal(null)}
               />
             )}
-            {showAddHb && (
-              <AddHbA1cModal
-                onAdd={e => {
-                  setHbData(p => [...p, e]);
-                  logHbA1cRecord(e).catch(err => console.error("Failed to sync HbA1c record", err));
-                }}
-                onClose={() => setShowAddHb(false)}
+            {glucoseModal && (
+              <GlucoseModal
+                initial={glucoseModal === "new" ? undefined : glucoseModal}
+                onSave={e => upsertRecord(e, setGlucoseData, logGlucoseRecord, amendGlucoseRecord)}
+                onClose={() => setGlucoseModal(null)}
+              />
+            )}
+            {hbModal && (
+              <HbA1cModal
+                initial={hbModal === "new" ? undefined : hbModal}
+                onSave={e => upsertRecord(e, setHbData, logHbA1cRecord, amendHbA1cRecord)}
+                onClose={() => setHbModal(null)}
               />
             )}
 
@@ -897,16 +1038,36 @@ export default function App() {
                   <NavBar title="健康助理" />
                   <div className="flex-1 overflow-y-auto px-3 py-4 space-y-3" style={{ scrollbarWidth: "none" }}>
                     {messages.map(m => (
-                      <div key={m.id} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} items-end gap-2`}>
-                        {m.role === "agent" && (
-                          <div className="w-8 h-8 rounded-full bg-[#007AFF] flex items-center justify-center flex-shrink-0 mb-1">
-                            <Activity className="w-4 h-4 text-white" />
+                      <div key={m.id} className="flex flex-col gap-1.5">
+                        <div className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} items-end gap-2`}>
+                          {m.role === "agent" && (
+                            <div className="w-8 h-8 rounded-full bg-[#007AFF] flex items-center justify-center flex-shrink-0 mb-1">
+                              <Activity className="w-4 h-4 text-white" />
+                            </div>
+                          )}
+                          <div className={`max-w-[78%] px-4 py-2.5 rounded-[18px] text-[16px] leading-relaxed ${m.role === "user" ? "bg-[#007AFF] text-white rounded-br-[4px]" : "bg-card text-foreground rounded-bl-[4px]"}`}
+                            style={m.role === "agent" ? { boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" } : {}}>
+                            {m.text}
+                          </div>
+                        </div>
+                        {m.role === "agent" && m.isEmergency && (
+                          <div className="flex items-center gap-2 pl-10">
+                            <a href="tel:999"
+                              className="flex items-center gap-1.5 px-3.5 py-2 rounded-full text-[13px] font-semibold text-white"
+                              style={{ backgroundColor: "#FF3B30" }}>
+                              <Phone className="w-3.5 h-3.5" />致電999
+                            </a>
+                            <button
+                              onClick={() => {
+                                setSos(true);
+                                alertCaregiver("對話中偵測到緊急徵狀，使用者可能需要協助").catch(err => console.error("Failed to notify caregiver", err));
+                              }}
+                              className="flex items-center gap-1.5 px-3.5 py-2 rounded-full text-[13px] font-semibold"
+                              style={{ backgroundColor: "#FF3B301A", color: "#FF3B30" }}>
+                              尋求緊急協助
+                            </button>
                           </div>
                         )}
-                        <div className={`max-w-[78%] px-4 py-2.5 rounded-[18px] text-[16px] leading-relaxed ${m.role === "user" ? "bg-[#007AFF] text-white rounded-br-[4px]" : "bg-card text-foreground rounded-bl-[4px]"}`}
-                          style={m.role === "agent" ? { boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" } : {}}>
-                          {m.text}
-                        </div>
                       </div>
                     ))}
                     {typing && (
@@ -1031,7 +1192,7 @@ export default function App() {
                             <p className="text-[18px] font-bold text-foreground">{latestBP.sys}/{latestBP.dia}</p>
                             <span className="text-[11px] font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: bpStatus.color + "18", color: bpStatus.color }}>{bpStatus.label}</span>
                           </div>
-                          <button onClick={() => setShowAddBP(true)}
+                          <button onClick={() => setBpModal("new")}
                             className="w-8 h-8 rounded-full bg-[#007AFF] flex items-center justify-center flex-shrink-0">
                             <Plus className="w-4 h-4 text-white" />
                           </button>
@@ -1058,18 +1219,81 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Recent BP readings */}
-                    <Section label="血壓記錄">
-                      {[...bpData].reverse().slice(0, 4).map((r, i, arr) => {
+                    {/* Recent BP readings — tap to amend */}
+                    <Section label="血壓記錄（輕按可修改）">
+                      {[...bpData].reverse().slice(0, 7).map((r, i, arr) => {
                         const s = r.sys < 130 && r.dia < 80 ? { label: "正常", color: "#34C759" } : r.sys >= 140 ? { label: "偏高", color: "#FF3B30" } : { label: "輕微偏高", color: "#FF9500" };
                         return (
-                          <div key={i} className={`px-4 py-3 flex items-center justify-between ${i < arr.length - 1 ? "border-b" : ""}`} style={{ borderColor: "rgba(60,60,67,0.12)" }}>
+                          <button key={r.id ?? i} onClick={() => setBpModal(r)}
+                            className={`w-full px-4 py-3 flex items-center justify-between text-left active:bg-gray-100 transition-colors ${i < arr.length - 1 ? "border-b" : ""}`}
+                            style={{ borderColor: "rgba(60,60,67,0.12)" }}>
                             <div>
                               <p className="text-[17px] font-semibold text-foreground">{r.sys}/{r.dia} <span className="text-[13px] font-normal text-[#8E8E93]">mmHg</span></p>
                               <p className="text-[13px] text-[#8E8E93]">{r.date}</p>
                             </div>
-                            <span className="text-[12px] font-bold px-2.5 py-1 rounded-full" style={{ backgroundColor: s.color + "18", color: s.color }}>{s.label}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[12px] font-bold px-2.5 py-1 rounded-full" style={{ backgroundColor: s.color + "18", color: s.color }}>{s.label}</span>
+                              <ChevronRight className="w-4 h-4 flex-shrink-0" style={{ color: "#C7C7CC" }} />
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </Section>
+
+                    {/* Glucose (血糖) chart card */}
+                    <div className="mx-4 bg-card rounded-[16px] overflow-hidden" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                      <div className="flex items-center justify-between px-4 pt-4 pb-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <Activity className="w-4 h-4 text-[#5AC8FA]" />
+                            <p className="text-[15px] font-semibold text-foreground">血糖趨勢</p>
                           </div>
+                          <p className="text-[12px] mt-0.5" style={{ color: "#8E8E93" }}>目標：空腹 4.0 – 7.0 mmol/L</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-right mr-1">
+                            <p className="text-[18px] font-bold text-foreground">{latestGlucose.value}</p>
+                            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: glucoseStatus.color + "18", color: glucoseStatus.color }}>{glucoseStatus.label}</span>
+                          </div>
+                          <button onClick={() => setGlucoseModal("new")}
+                            className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
+                            style={{ backgroundColor: "#5AC8FA" }}>
+                            <Plus className="w-4 h-4 text-white" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="px-2 pb-4" style={{ height: 160 }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={glucoseData} margin={{ top: 8, right: 12, left: -20, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(60,60,67,0.08)" />
+                            <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#8E8E93" }} axisLine={false} tickLine={false} />
+                            <YAxis domain={[2, 12]} tick={{ fontSize: 11, fill: "#8E8E93" }} axisLine={false} tickLine={false} />
+                            <Tooltip content={(p: any) => <GlucoseTooltip {...p} />} />
+                            <ReferenceLine y={7} stroke="#34C759" strokeDasharray="4 3" strokeWidth={1} label={{ value: "7.0", fill: "#34C759", fontSize: 10, position: "right" }} />
+                            <ReferenceLine y={4} stroke="#FF9500" strokeDasharray="4 3" strokeWidth={1} label={{ value: "4.0", fill: "#FF9500", fontSize: 10, position: "right" }} />
+                            <Line type="monotone" dataKey="value" stroke="#5AC8FA" strokeWidth={2.5} dot={{ r: 4, fill: "#5AC8FA", strokeWidth: 0 }} name="血糖" activeDot={{ r: 6 }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    {/* Recent glucose readings — tap to amend */}
+                    <Section label="血糖記錄（輕按可修改）">
+                      {[...glucoseData].reverse().slice(0, 7).map((r, i, arr) => {
+                        const s = r.value >= 4.0 && r.value <= 7.0 ? { label: "正常", color: "#34C759" } : r.value < 4.0 ? { label: "偏低", color: "#FF3B30" } : { label: "偏高", color: "#FF9500" };
+                        return (
+                          <button key={r.id ?? i} onClick={() => setGlucoseModal(r)}
+                            className={`w-full px-4 py-3 flex items-center justify-between text-left active:bg-gray-100 transition-colors ${i < arr.length - 1 ? "border-b" : ""}`}
+                            style={{ borderColor: "rgba(60,60,67,0.12)" }}>
+                            <div>
+                              <p className="text-[17px] font-semibold text-foreground">{r.value} <span className="text-[13px] font-normal text-[#8E8E93]">mmol/L</span></p>
+                              <p className="text-[13px] text-[#8E8E93]">{r.date}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[12px] font-bold px-2.5 py-1 rounded-full" style={{ backgroundColor: s.color + "18", color: s.color }}>{s.label}</span>
+                              <ChevronRight className="w-4 h-4 flex-shrink-0" style={{ color: "#C7C7CC" }} />
+                            </div>
+                          </button>
                         );
                       })}
                     </Section>
@@ -1089,7 +1313,7 @@ export default function App() {
                             <p className="text-[18px] font-bold text-foreground">{latestHb.value}%</p>
                             <span className="text-[11px] font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: hbStatus.color + "18", color: hbStatus.color }}>{hbStatus.label}</span>
                           </div>
-                          <button onClick={() => setShowAddHb(true)}
+                          <button onClick={() => setHbModal("new")}
                             className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
                             style={{ backgroundColor: "#FF9500" }}>
                             <Plus className="w-4 h-4 text-white" />
@@ -1113,18 +1337,23 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Recent HbA1c readings */}
-                    <Section label="HbA1c 記錄">
+                    {/* Recent HbA1c readings — tap to amend */}
+                    <Section label="HbA1c 記錄（輕按可修改）">
                       {[...hbData].reverse().map((r, i, arr) => {
                         const s = r.value < 7 ? { label: "達標", color: "#34C759" } : r.value < 8 ? { label: "輕微偏高", color: "#FF9500" } : { label: "偏高", color: "#FF3B30" };
                         return (
-                          <div key={i} className={`px-4 py-3 flex items-center justify-between ${i < arr.length - 1 ? "border-b" : ""}`} style={{ borderColor: "rgba(60,60,67,0.12)" }}>
+                          <button key={r.id ?? i} onClick={() => setHbModal(r)}
+                            className={`w-full px-4 py-3 flex items-center justify-between text-left active:bg-gray-100 transition-colors ${i < arr.length - 1 ? "border-b" : ""}`}
+                            style={{ borderColor: "rgba(60,60,67,0.12)" }}>
                             <div>
                               <p className="text-[17px] font-semibold text-foreground">{r.value}% <span className="text-[13px] font-normal text-[#8E8E93]">HbA1c</span></p>
                               <p className="text-[13px] text-[#8E8E93]">{r.date}</p>
                             </div>
-                            <span className="text-[12px] font-bold px-2.5 py-1 rounded-full" style={{ backgroundColor: s.color + "18", color: s.color }}>{s.label}</span>
-                          </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[12px] font-bold px-2.5 py-1 rounded-full" style={{ backgroundColor: s.color + "18", color: s.color }}>{s.label}</span>
+                              <ChevronRight className="w-4 h-4 flex-shrink-0" style={{ color: "#C7C7CC" }} />
+                            </div>
+                          </button>
                         );
                       })}
                     </Section>

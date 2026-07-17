@@ -13,6 +13,11 @@ class _StubAgent:
         return {"answer": f"stub reply to: {message}", "sources": ["hkrf_ht.pdf"]}
 
 
+class _EmergencyStubAgent:
+    def ask(self, message, profile, chat_history=None):
+        return {"answer": "呢個係緊急情況，請立即致電999！", "sources": ["hkrf_ht.pdf"]}
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(api, "get_medical_agent", lambda: _StubAgent())
@@ -50,11 +55,18 @@ def test_chat_with_history(client):
     assert res.status_code == 200
 
 
-def test_log_reading_roundtrip(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "save_health_log", lambda bp=0, glucose=0: {"bp": bp, "glucose": glucose})
-    res = client.post("/api/log", json={"bp": 130, "glucose": 6.0})
+def test_chat_flags_non_emergency_reply(client):
+    res = client.post("/api/chat", json={"message": "血糖偏低", "history": []})
     assert res.status_code == 200
-    assert res.json() == {"bp": 130, "glucose": 6.0}
+    assert res.json()["is_emergency"] is False
+
+
+def test_chat_flags_emergency_reply(monkeypatch):
+    monkeypatch.setattr(api, "get_medical_agent", lambda: _EmergencyStubAgent())
+    client = TestClient(api.app)
+    res = client.post("/api/chat", json={"message": "胸口好痛", "history": []})
+    assert res.status_code == 200
+    assert res.json()["is_emergency"] is True
 
 
 def test_medication_log(client, monkeypatch):
@@ -109,6 +121,55 @@ def test_get_hba1c_records_filters_by_type(client, monkeypatch):
     res = client.get("/api/records/hba1c")
     assert res.status_code == 200
     assert res.json() == [{"type": "hba1c_reading", "date": "5月", "value": 7.4}]
+
+
+def test_log_glucose_record(client, monkeypatch):
+    monkeypatch.setattr(api, "save_event_log", lambda t, p: {"type": t, **p})
+    res = client.post("/api/records/glucose", json={"date": "2026-07-17", "value": 6.2})
+    assert res.status_code == 200
+    assert res.json() == {"type": "glucose_reading", "date": "2026-07-17", "value": 6.2}
+
+
+def test_get_glucose_records_filters_by_type(client, monkeypatch):
+    events = [
+        {"type": "glucose_reading", "date": "2026-07-16", "value": 5.8},
+        {"type": "bp_reading", "date": "2026-07-16", "sys": 128, "dia": 80},
+    ]
+    monkeypatch.setattr(api, "load_event_logs", lambda limit=2000: events)
+    res = client.get("/api/records/glucose")
+    assert res.status_code == 200
+    assert res.json() == [{"type": "glucose_reading", "date": "2026-07-16", "value": 5.8}]
+
+
+def test_amend_bp_record(client, monkeypatch):
+    monkeypatch.setattr(
+        api, "update_event_log",
+        lambda entry_id, patch: {"id": entry_id, "type": "bp_reading", "date": "2026-07-17", "sys": 135, "dia": 85, **patch},
+    )
+    res = client.patch("/api/records/bp/abc123", json={"sys": 135, "dia": 85})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["sys"] == 135 and body["dia"] == 85
+
+
+def test_amend_missing_record_returns_404(client, monkeypatch):
+    monkeypatch.setattr(api, "update_event_log", lambda entry_id, patch: None)
+    res = client.patch("/api/records/hba1c/does-not-exist", json={"value": 7.0})
+    assert res.status_code == 404
+
+
+def test_amend_glucose_record_only_sends_provided_fields(client, monkeypatch):
+    captured = {}
+
+    def fake_update(entry_id, patch):
+        captured["entry_id"] = entry_id
+        captured["patch"] = patch
+        return {"id": entry_id, "type": "glucose_reading", **patch}
+
+    monkeypatch.setattr(api, "update_event_log", fake_update)
+    res = client.patch("/api/records/glucose/xyz", json={"value": 5.5})
+    assert res.status_code == 200
+    assert captured["patch"] == {"value": 5.5}  # date wasn't sent, so it's omitted, not nulled out
 
 
 def test_eval_report_missing_returns_404(client, tmp_path, monkeypatch):

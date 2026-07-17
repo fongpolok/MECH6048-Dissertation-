@@ -291,13 +291,72 @@ Add lines to `eval/qa_testset.jsonl` — each is a JSON object with `id`,
   clinical validation. Do not treat a passing run as a substitute for
   clinical review before any real deployment to actual patients.
 
+## 4. Running on your iPhone
+
+Two options, in order of effort. Both need your Mac and iPhone on the **same
+Wi-Fi network**.
+
+### Option A — open it in Safari over your LAN (works today, no extra tooling)
+
+1. Start the backend and frontend as in [Local (no Docker)](#local-no-docker),
+   but bind the frontend to your network interface, not just localhost:
+   ```bash
+   cd "Figma/Elderly Health AI Agent"
+   npm run dev -- --host --port 5173
+   ```
+   Vite prints a `Network:` URL, e.g. `http://192.168.1.23:5173`.
+2. Also make sure the backend is reachable on the network (already the case
+   if you started it with `--host 0.0.0.0`, e.g.
+   `uvicorn src.api:app --host 0.0.0.0 --port 8000`).
+3. Find your Mac's LAN IP if you need it: `ipconfig getifaddr en0`.
+4. On your iPhone, open Safari and go to `http://<your-mac-lan-ip>:5173`.
+   The frontend auto-detects the host it was loaded from and talks to the
+   backend on the same host at port 8000 (`src/app/lib/api.ts`,
+   `defaultApiBaseUrl()`) — no config needed. The backend's CORS is set up to
+   allow any private-LAN origin on port 5173 automatically (`src/api.py`), so
+   this works even though your phone's IP wasn't known in advance.
+5. On a real phone viewport, the app drops the decorative "iPhone mockup"
+   frame/fake status bar (that's only for previewing on a desktop browser)
+   and renders full-screen.
+6. **Add to Home Screen** (Safari → Share → Add to Home Screen) to launch it
+   like a real app, without the Safari address bar, using the
+   `public/manifest.json` + `apple-mobile-web-app-capable` meta tags already
+   set up in `index.html`.
+
+This is the realistic "try it on my phone" path — no Xcode, no App Store, no
+Apple Developer account, and both the LLM (Ollama on your Mac) and the app
+are used live.
+
+### Option B — a real native app shell via Xcode (heavier, not set up yet)
+
+Wrapping the same web app in a native shell (e.g. with
+[Capacitor](https://capacitorjs.com)) so it has a real app icon, works
+offline-cached, and can be built/run from Xcode onto your device is possible
+but is a materially bigger lift: it needs Xcode (not just Command Line
+Tools — this Mac currently only has the CLT installed, not the full Xcode
+app, which is a multi-GB App Store install), a free or paid Apple ID
+signed into Xcode, and trusting the developer certificate on your iPhone
+(Settings → General → VPN & Device Management) the first time you run it.
+Not implemented here — Option A gets you testing today. If you want this
+path, install Xcode from the App Store first, then ask for the Capacitor
+setup (`npm install @capacitor/core @capacitor/ios`, `npx cap add ios`,
+`npx cap open ios`).
+
 ## Known extension points
 
 - `alert_caregiver` (`src/tools.py`) currently only logs to stdout — wire it
   to a real SMS/push provider (Twilio, FCM, etc.) before relying on it.
-- Health/event logs are flat JSONL files (`data/health_logs.jsonl`,
-  `data/events_log.jsonl`) — fine for a prototype/single user, swap for a real
-  DB (with per-user IDs) for multi-user deployment.
-- `user_profile.json` is a single hardcoded profile; the React app's demo data
-  (陳婆婆) and this profile (陳太) aren't the same person — reconcile them (or
-  add multi-profile support) before a real pilot.
+- Event logs are a flat JSONL file (`data/events_log.jsonl`, one entry per
+  medication/BP/glucose/HbA1c/wellness event with a unique id so entries can
+  be amended in place) — fine for a prototype/single user, swap for a real DB
+  (with per-user IDs) for multi-user deployment.
+- `user_profile.json` is a single hardcoded profile used server-side for the
+  LLM's context (conditions, medications, caregiver phone). The frontend's
+  onboarding flow (name/age/gender) is currently local-only and not synced to
+  it — reconcile them (or add multi-profile support) before a real pilot.
+- The in-chat emergency detection (`src/api.py` `_is_emergency_reply`) is a
+  positional heuristic ("999" appears near the start of the reply, per the
+  system prompt's "lead with 999" rule) — good enough to avoid false-positives
+  from routine safety-reminder footnotes, but an explicit structured field
+  from the model (e.g. a `severity` tool call) would be more robust than
+  string-sniffing the final answer.

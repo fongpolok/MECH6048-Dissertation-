@@ -1,0 +1,9 @@
+{
+  "name": "健康伴侶 - Elderly Health AI Agent",
+  "short_name": "健康伴侶",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F2F2F7",
+  "theme_color": "#007AFF",
+  "orientation": "portrait"
+}
