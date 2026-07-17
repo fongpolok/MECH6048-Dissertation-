@@ -54,6 +54,27 @@ export function checkHealth(): Promise<{ status: string }> {
   return request("/api/health");
 }
 
+// ── Health records (血壓/HbA1c trend tracking in the 記錄 tab) ─────────────────
+
+export type BPRecord = { date: string; sys: number; dia: number };
+export type HbA1cRecord = { date: string; value: number };
+
+export function logBPRecord(entry: BPRecord): Promise<unknown> {
+  return request("/api/records/bp", { method: "POST", body: JSON.stringify(entry) });
+}
+
+export function getBPRecords(): Promise<BPRecord[]> {
+  return request<BPRecord[]>("/api/records/bp");
+}
+
+export function logHbA1cRecord(entry: HbA1cRecord): Promise<unknown> {
+  return request("/api/records/hba1c", { method: "POST", body: JSON.stringify(entry) });
+}
+
+export function getHbA1cRecords(): Promise<HbA1cRecord[]> {
+  return request<HbA1cRecord[]>("/api/records/hba1c");
+}
+
 // Mirrors the report shape written by eval/evaluate.py (src/api.py just reads
 // the JSON file straight through).
 export type EvalCaseRun = {

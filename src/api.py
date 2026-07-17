@@ -55,6 +55,17 @@ class WellnessSubmission(BaseModel):
     answers: dict[str, str]
 
 
+class BPRecord(BaseModel):
+    date: str
+    sys: float
+    dia: float
+
+
+class HbA1cRecord(BaseModel):
+    date: str
+    value: float
+
+
 def _to_langchain_history(history: list[ChatTurn]):
     converted = []
     for turn in history:
@@ -114,6 +125,28 @@ def log_medication(req: MedicationEvent):
 @app.post("/api/wellness")
 def submit_wellness(req: WellnessSubmission):
     return save_event_log("wellness", req.model_dump())
+
+
+@app.post("/api/records/bp")
+def log_bp_record(req: BPRecord):
+    return save_event_log("bp_reading", req.model_dump())
+
+
+@app.get("/api/records/bp")
+def get_bp_records(limit: int = 50):
+    events = load_event_logs(limit=1000)
+    return [e for e in events if e.get("type") == "bp_reading"][-limit:]
+
+
+@app.post("/api/records/hba1c")
+def log_hba1c_record(req: HbA1cRecord):
+    return save_event_log("hba1c_reading", req.model_dump())
+
+
+@app.get("/api/records/hba1c")
+def get_hba1c_records(limit: int = 50):
+    events = load_event_logs(limit=1000)
+    return [e for e in events if e.get("type") == "hba1c_reading"][-limit:]
 
 
 @app.get("/api/events")

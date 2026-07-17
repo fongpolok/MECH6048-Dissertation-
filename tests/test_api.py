@@ -71,6 +71,46 @@ def test_wellness_submission(client, monkeypatch):
     assert res.json()["type"] == "wellness"
 
 
+def test_log_bp_record(client, monkeypatch):
+    monkeypatch.setattr(api, "save_event_log", lambda t, p: {"type": t, **p})
+    res = client.post("/api/records/bp", json={"date": "7月", "sys": 130, "dia": 82})
+    assert res.status_code == 200
+    assert res.json() == {"type": "bp_reading", "date": "7月", "sys": 130, "dia": 82}
+
+
+def test_get_bp_records_filters_by_type(client, monkeypatch):
+    events = [
+        {"type": "bp_reading", "date": "6月", "sys": 128, "dia": 80},
+        {"type": "medication", "name": "Metformin", "taken": True},
+        {"type": "bp_reading", "date": "7月", "sys": 130, "dia": 82},
+    ]
+    monkeypatch.setattr(api, "load_event_logs", lambda limit=1000: events)
+    res = client.get("/api/records/bp")
+    assert res.status_code == 200
+    assert res.json() == [
+        {"type": "bp_reading", "date": "6月", "sys": 128, "dia": 80},
+        {"type": "bp_reading", "date": "7月", "sys": 130, "dia": 82},
+    ]
+
+
+def test_log_hba1c_record(client, monkeypatch):
+    monkeypatch.setattr(api, "save_event_log", lambda t, p: {"type": t, **p})
+    res = client.post("/api/records/hba1c", json={"date": "7月", "value": 7.1})
+    assert res.status_code == 200
+    assert res.json() == {"type": "hba1c_reading", "date": "7月", "value": 7.1}
+
+
+def test_get_hba1c_records_filters_by_type(client, monkeypatch):
+    events = [
+        {"type": "hba1c_reading", "date": "5月", "value": 7.4},
+        {"type": "bp_reading", "date": "6月", "sys": 128, "dia": 80},
+    ]
+    monkeypatch.setattr(api, "load_event_logs", lambda limit=1000: events)
+    res = client.get("/api/records/hba1c")
+    assert res.status_code == 200
+    assert res.json() == [{"type": "hba1c_reading", "date": "5月", "value": 7.4}]
+
+
 def test_eval_report_missing_returns_404(client, tmp_path, monkeypatch):
     monkeypatch.setattr(api, "EVAL_REPORT_PATH", tmp_path / "does_not_exist.json")
     res = client.get("/api/eval/latest")
