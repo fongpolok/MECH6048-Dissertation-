@@ -1,5 +1,7 @@
 """API contract tests. The LLM agent is stubbed out so these run offline/without
 Ollama — see eval/evaluate.py for tests that exercise the real model."""
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -67,3 +69,19 @@ def test_wellness_submission(client, monkeypatch):
     res = client.post("/api/wellness", json={"answers": {"1": "良好"}})
     assert res.status_code == 200
     assert res.json()["type"] == "wellness"
+
+
+def test_eval_report_missing_returns_404(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "EVAL_REPORT_PATH", tmp_path / "does_not_exist.json")
+    res = client.get("/api/eval/latest")
+    assert res.status_code == 404
+
+
+def test_eval_report_returns_saved_json(client, tmp_path, monkeypatch):
+    report = {"summary": {"overall_pass_rate": 0.75}, "cases": []}
+    report_path = tmp_path / "latest.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setattr(api, "EVAL_REPORT_PATH", report_path)
+    res = client.get("/api/eval/latest")
+    assert res.status_code == 200
+    assert res.json() == report

@@ -4,11 +4,28 @@ import {
   Send, Check, Bell, User, Home,
   Mic, MicOff, Video, Clock, Star, Stethoscope,
   ChevronRight, Wifi, Battery, Signal,
+  ShieldCheck, RefreshCw, CheckCircle2, XCircle, AlertTriangle,
 } from "lucide-react";
-import { sendChatMessage, logMedication, submitWellness, alertCaregiver, type ChatTurn } from "./lib/api";
+import {
+  sendChatMessage, logMedication, submitWellness, alertCaregiver,
+  getEvalReport, type ChatTurn, type EvalReport,
+} from "./lib/api";
 
-type Tab = "home" | "chat" | "medications" | "wellness" | "consult";
+type Tab = "home" | "chat" | "medications" | "wellness" | "consult" | "eval";
 type Message = { id: string; role: "user" | "agent"; text: string; time: string };
+
+const evalCategoryLabels: Record<string, string> = {
+  grounded_fact: "資料準確度 (Grounded Facts)",
+  safety_critical: "緊急安全觸發 (Safety-Critical)",
+  hallucination_trap: "防止亂up資料 (Hallucination Trap)",
+  tool_claim_consistency: "工具動作一致性 (Tool-Claim)",
+};
+
+function rateColor(rate: number): string {
+  if (rate >= 0.9) return "#34C759";
+  if (rate >= 0.5) return "#FF9500";
+  return "#FF3B30";
+}
 
 const agentResponses: Record<string, string> = {
   default: "我明白您的情況。可以詳細描述一下您現在的感覺嗎？例如是否有頭暈、胸悶或其他不適？",
@@ -108,6 +125,7 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
     { id: "medications" as Tab, label: "藥物", icon: Pill },
     { id: "wellness" as Tab, label: "健康", icon: Heart },
     { id: "consult" as Tab, label: "醫療", icon: Stethoscope },
+    { id: "eval" as Tab, label: "測試", icon: ShieldCheck },
   ];
   return (
     <div
@@ -178,6 +196,19 @@ function Cell({ icon, iconBg, label, sublabel, right, onPress, last = false, dan
   );
 }
 
+// Pass-rate pill, used across the Testing tab
+function RateBadge({ rate }: { rate: number }) {
+  const color = rateColor(rate);
+  return (
+    <span
+      className="text-[13px] font-bold px-2.5 py-1 rounded-full flex-shrink-0"
+      style={{ color, backgroundColor: `${color}1A` }}
+    >
+      {Math.round(rate * 100)}%
+    </span>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
   const [messages, setMessages] = useState<Message[]>([{
@@ -192,10 +223,36 @@ export default function App() {
   const [taken, setTaken] = useState<Record<string, boolean>>(Object.fromEntries(medications.map(m => [m.name, m.initially])));
   const [listening, setListening] = useState(false);
   const [booked, setBooked] = useState<string | null>(null);
+  const [evalReport, setEvalReport] = useState<EvalReport | null>(null);
+  const [evalLoading, setEvalLoading] = useState(false);
+  const [evalError, setEvalError] = useState<string | null>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognition | null>(null);
 
+  async function loadEvalReport() {
+    setEvalLoading(true);
+    setEvalError(null);
+    try {
+      const report = await getEvalReport();
+      setEvalReport(report);
+    } catch (err) {
+      setEvalError(
+        "未有評估報告，或者後台伺服器未開啟。請喺後台專案根目錄執行 `python -m eval.evaluate`，然後再撳「重新整理」。"
+      );
+      console.error("Failed to load eval report", err);
+    } finally {
+      setEvalLoading(false);
+    }
+  }
+
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, typing]);
+
+  useEffect(() => {
+    if (tab === "eval" && !evalReport && !evalLoading) {
+      loadEvalReport();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -669,6 +726,128 @@ export default function App() {
                     </div>
                   ))}
                 </Section>
+              </div>
+            </>
+          )}
+
+          {/* ── 測試 (Testing & Hallucination Evaluation) ── */}
+          {tab === "eval" && (
+            <>
+              <NavBar title="測試同評估" large />
+              <div className="flex-1 overflow-y-auto py-3 space-y-6" style={{ scrollbarWidth: "none" }}>
+                <p className="mx-4 text-[13px]" style={{ color: "#8E8E93" }}>
+                  下面嘅結果嚟自 <code>eval/evaluate.py</code> 對真實 Ollama 模型嘅測試，用嚟檢查回答有冇根據官方指引、
+                  有冇喺急症徵狀時提示999，同埋有冇「亂up」答案（hallucination）。
+                </p>
+
+                {evalLoading && (
+                  <div className="mx-4 bg-card rounded-[16px] p-8 text-center" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                    <RefreshCw className="w-6 h-6 mx-auto mb-3 animate-spin" style={{ color: "#007AFF" }} />
+                    <p className="text-[15px]" style={{ color: "#8E8E93" }}>載入緊評估報告…</p>
+                  </div>
+                )}
+
+                {!evalLoading && evalError && (
+                  <div className="mx-4 bg-card rounded-[16px] p-6 text-center" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                    <AlertTriangle className="w-8 h-8 mx-auto mb-3" style={{ color: "#FF9500" }} />
+                    <p className="text-[15px] text-foreground mb-4">{evalError}</p>
+                    <button
+                      onClick={loadEvalReport}
+                      className="px-6 py-3 rounded-[14px] text-[#007AFF] text-[15px] font-semibold"
+                      style={{ backgroundColor: "#F2F2F7" }}
+                    >
+                      重新整理
+                    </button>
+                  </div>
+                )}
+
+                {!evalLoading && !evalError && evalReport && (
+                  <>
+                    {/* Overall */}
+                    <div
+                      className="mx-4 rounded-[16px] p-5 flex items-center justify-between"
+                      style={{ backgroundColor: rateColor(evalReport.summary.overall_pass_rate) }}
+                    >
+                      <div>
+                        <p className="text-white/70 text-[13px] font-medium">整體通過率</p>
+                        <p className="text-white text-[34px] font-bold leading-none mt-1">
+                          {Math.round(evalReport.summary.overall_pass_rate * 100)}%
+                        </p>
+                        <p className="text-white/70 text-[13px] mt-1">
+                          {evalReport.cases.length} 條測試問題 · 每條重複 {evalReport.repeat} 次
+                        </p>
+                      </div>
+                      <ShieldCheck className="w-12 h-12 text-white/80" />
+                    </div>
+
+                    {evalReport.summary.hallucination_related_pass_rate !== null && (
+                      <Section label="關鍵安全指標">
+                        <Cell
+                          icon={<AlertTriangle className="w-5 h-5 text-white" />}
+                          iconBg={rateColor(evalReport.summary.hallucination_related_pass_rate)}
+                          label="防止亂up + 工具動作一致性"
+                          sublabel="呢個數字最直接反映模型有冇講大話或者亂up資料"
+                          right={<RateBadge rate={evalReport.summary.hallucination_related_pass_rate} />}
+                          last
+                        />
+                      </Section>
+                    )}
+
+                    {/* Per category */}
+                    <Section label="各類別通過率">
+                      {Object.entries(evalReport.summary.by_category).map(([cat, rate], i, arr) => (
+                        <Cell
+                          key={cat}
+                          label={evalCategoryLabels[cat] ?? cat}
+                          right={<RateBadge rate={rate} />}
+                          last={i === arr.length - 1}
+                        />
+                      ))}
+                    </Section>
+
+                    {/* Individual cases */}
+                    <Section label="個別測試結果">
+                      {evalReport.cases.map((c, i, arr) => {
+                        const passed = c.pass_rate === 1;
+                        const failedRuns = c.runs.filter(r => !r.pass);
+                        return (
+                          <div
+                            key={c.id}
+                            className={`px-4 py-3 ${i < arr.length - 1 ? "border-b" : ""}`}
+                            style={{ borderColor: "rgba(60,60,67,0.12)" }}
+                          >
+                            <div className="flex items-start gap-2">
+                              {passed
+                                ? <CheckCircle2 className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: "#34C759" }} />
+                                : <XCircle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: "#FF3B30" }} />}
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[15px] text-foreground leading-snug">{c.question}</p>
+                                <p className="text-[12px] mt-0.5" style={{ color: "#8E8E93" }}>
+                                  {evalCategoryLabels[c.category] ?? c.category}
+                                </p>
+                                {failedRuns.length > 0 && failedRuns[0].reasons.map((reason, ri) => (
+                                  <p key={ri} className="text-[12px] mt-1" style={{ color: "#FF3B30" }}>
+                                    ⚠ {reason}
+                                  </p>
+                                ))}
+                              </div>
+                              <RateBadge rate={c.pass_rate} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </Section>
+
+                    <button
+                      onClick={loadEvalReport}
+                      className="mx-4 flex items-center justify-center gap-2 py-3 rounded-[14px] text-[#007AFF] text-[15px] font-semibold"
+                      style={{ backgroundColor: "#F2F2F7" }}
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                      重新整理
+                    </button>
+                  </>
+                )}
               </div>
             </>
           )}

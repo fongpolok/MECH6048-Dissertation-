@@ -53,3 +53,38 @@ export function alertCaregiver(message: string): Promise<unknown> {
 export function checkHealth(): Promise<{ status: string }> {
   return request("/api/health");
 }
+
+// Mirrors the report shape written by eval/evaluate.py (src/api.py just reads
+// the JSON file straight through).
+export type EvalCaseRun = {
+  answer: string;
+  sources: string[];
+  tool_calls: string[];
+  pass: boolean;
+  reasons: string[];
+};
+
+export type EvalCase = {
+  id: string;
+  category: string;
+  question: string;
+  pass_rate: number;
+  runs: EvalCaseRun[];
+};
+
+export type EvalSummary = {
+  overall_pass_rate: number;
+  by_category: Record<string, number>;
+  hallucination_related_pass_rate: number | null;
+};
+
+export type EvalReport = {
+  testset: string;
+  repeat: number;
+  summary: EvalSummary;
+  cases: EvalCase[];
+};
+
+export function getEvalReport(): Promise<EvalReport> {
+  return request<EvalReport>("/api/eval/latest");
+}

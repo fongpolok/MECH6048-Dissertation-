@@ -1,3 +1,4 @@
+import json
 import os
 
 from fastapi import FastAPI, HTTPException
@@ -6,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
 from src.agent import get_medical_agent
+from src.config import EVAL_REPORT_PATH
 from src.tools import alert_caregiver
 from src.utils import load_event_logs, load_health_logs, load_profile, save_event_log, save_health_log
 
@@ -117,3 +119,17 @@ def submit_wellness(req: WellnessSubmission):
 @app.get("/api/events")
 def get_events(limit: int = 50):
     return load_event_logs(limit=limit)
+
+
+@app.get("/api/eval/latest")
+def get_eval_report():
+    """Serves the last `python -m eval.evaluate` run (accuracy / hallucination /
+    safety-critical pass rates) for the app's Testing tab. Static file, not a
+    live re-run — a full pass takes minutes against a real Ollama model."""
+    if not EVAL_REPORT_PATH.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="No evaluation report yet. Run `python -m eval.evaluate` on the backend host first.",
+        )
+    with open(EVAL_REPORT_PATH, encoding="utf-8") as f:
+        return json.load(f)
