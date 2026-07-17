@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Claude Code local session state
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Env / secrets
+.env
+.env.local
+
+# Data generated at runtime
+chroma_db/
+data/health_logs.jsonl
+data/events_log.jsonl
+
+# Frontend
+Figma/**/node_modules/
+Figma/**/dist/
+Figma/**/.env.local
+
+# Eval output
+eval/results/

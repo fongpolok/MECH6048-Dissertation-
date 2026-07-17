@@ -1,0 +1,6 @@
+{
+  "llm_model": "qwen3:32b",
+  "embedding_model": "qwen3-embedding",
+  "temperature": 0.3,
+  "hk_guidelines": true
+}

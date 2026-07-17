@@ -1,0 +1,14 @@
+streamlit
+fastapi
+uvicorn[standard]
+langchain
+langchain-community
+langchain-ollama
+langchain-chroma
+langchain-text-splitters
+chromadb
+python-dotenv
+pypdf
+tiktoken
+pydantic
+requests

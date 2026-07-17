@@ -1,0 +1,7 @@
+{
+  "name": "陳太",
+  "age": 72,
+  "conditions": ["hypertension", "type2_diabetes"],
+  "medications": [{"name": "Metformin", "dose": "500mg"}],
+  "caregiver_phone": "91234567"
+}

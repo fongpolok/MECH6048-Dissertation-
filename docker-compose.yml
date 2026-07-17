@@ -1,0 +1,80 @@
+services:
+  # --- LLM runtime -----------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot job: pulls the configured chat + embedding models into the ollama
+  # volume, then exits. Re-run with `docker compose run --rm ollama-pull` after
+  # changing OLLAMA_MODEL / OLLAMA_EMBEDDING_MODEL in .env.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        ollama pull ${OLLAMA_MODEL:-qwen2.5:7b-instruct} &&
+        ollama pull ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+
+  # --- Backend (FastAPI: RAG agent + tools, used by the React frontend) ------
+  backend:
+    build: .
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      - OLLAMA_EMBEDDING_MODEL=${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:8080
+    volumes:
+      - ./data:/app/data
+      - chroma_data:/app/chroma_db
+    ports:
+      - "8000:8000"
+
+  # Optional: the original single-file Streamlit UI, useful for quick manual
+  # testing of the agent without running the React frontend.
+  streamlit:
+    build: .
+    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      - OLLAMA_EMBEDDING_MODEL=${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+    volumes:
+      - ./data:/app/data
+      - chroma_data:/app/chroma_db
+    ports:
+      - "8501:8501"
+    profiles: ["streamlit"]
+
+  # --- Frontend (Figma-exported React app) ------------------------------------
+  frontend:
+    build:
+      context: ./Figma/Elderly Health AI Agent
+      args:
+        VITE_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  ollama_data:
+  chroma_data:
