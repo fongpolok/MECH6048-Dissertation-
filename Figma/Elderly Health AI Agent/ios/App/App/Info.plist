@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CAPACITOR_DEBUG</key>
+	<string>$(CAPACITOR_DEBUG)</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+        <string>健康伴侶</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>armv7</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<true/>
+
+	<!-- 掃描 (OCR scan) tab uses <input type="file" capture="environment"> to
+	     open the camera directly. -->
+	<key>NSCameraUsageDescription</key>
+	<string>需要使用相機掃描醫院文件（出院摘要、化驗報告、藥物處方等）</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>需要使用相簿選擇已拍攝嘅醫院文件相片</string>
+	<!-- Not currently used (Web Speech API isn't available in WKWebView), kept
+	     as a harmless default in case a native mic feature is added later. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>用於語音輸入健康問題</string>
+
+	<!-- Backend runs on the same Mac/LAN over plain HTTP (see README "Running
+	     the iOS app" — src/app/lib/api.ts / VITE_API_URL at build time), not
+	     HTTPS. NSAllowsLocalNetworking permits cleartext HTTP to local/private
+	     network addresses without weakening ATS for the public internet. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- Required since iOS 14 for the local-network-access permission prompt
+	     to appear at all when calling the backend's LAN IP. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>需要連接同一個Wi-Fi網絡上嘅健康助理後台伺服器</string>
+</dict>
+</plist>

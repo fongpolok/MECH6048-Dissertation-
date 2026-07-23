@@ -339,20 +339,53 @@ This is the realistic "try it on my phone" path — no Xcode, no App Store, no
 Apple Developer account, and both the LLM (Ollama on your Mac) and the app
 are used live.
 
-### Option B — a real native app shell via Xcode (heavier, not set up yet)
+### Option B — a real native app via Xcode (project is set up; needs Xcode to build)
 
-Wrapping the same web app in a native shell (e.g. with
-[Capacitor](https://capacitorjs.com)) so it has a real app icon, works
-offline-cached, and can be built/run from Xcode onto your device is possible
-but is a materially bigger lift: it needs Xcode (not just Command Line
-Tools — this Mac currently only has the CLT installed, not the full Xcode
-app, which is a multi-GB App Store install), a free or paid Apple ID
-signed into Xcode, and trusting the developer certificate on your iPhone
-(Settings → General → VPN & Device Management) the first time you run it.
-Not implemented here — Option A gets you testing today. If you want this
-path, install Xcode from the App Store first, then ask for the Capacitor
-setup (`npm install @capacitor/core @capacitor/ios`, `npx cap add ios`,
-`npx cap open ios`).
+The native iOS shell is built with [Capacitor](https://capacitorjs.com) and
+already scaffolded at `Figma/Elderly Health AI Agent/ios/` — app id
+`hk.elderguard.app`, deployment target **iOS 17.0**, camera/local-network
+permission strings already in `Info.plist`. **What's not done: this Mac only
+has the Command Line Tools, not the full Xcode app, and I can't install that
+myself** — it's a multi-GB App Store download that requires your Apple ID
+signed into the App Store app, an interactive GUI/account step I have no way
+to perform. Everything else is ready for the moment you have Xcode.
+
+1. **Install Xcode** — App Store → search "Xcode" → Get/Install (~10-15GB,
+   free). This alone can take a while depending on your connection.
+2. **First launch**: open Xcode once, accept the license, let it install
+   additional components if prompted.
+3. **Rebuild the web bundle pointing at your Mac's current LAN IP** (this is
+   baked in at build time — a native app isn't "loaded from" a host the way
+   a browser tab is, so the `window.location.hostname` auto-detect trick from
+   Option A doesn't apply here):
+   ```bash
+   cd "Figma/Elderly Health AI Agent"
+   ipconfig getifaddr en0   # confirm your Mac's current LAN IP
+   VITE_API_URL=http://<your-mac-lan-ip>:8000 npm run build:ios
+   ```
+   Re-run this (and re-build in Xcode) any time your Mac's IP changes — DHCP
+   can reassign it, e.g. after a router restart.
+4. **Open the project**: `npm run ios:open` (or open
+   `ios/App/App.xcodeproj` directly in Xcode).
+5. **In Xcode**: select the `App` target → **Signing & Capabilities** → check
+   "Automatically manage signing" → pick your Apple ID under **Team** (Xcode
+   → Settings → Accounts to add one if needed; a free personal team works for
+   running on your own device, no paid developer account required).
+6. **Connect your iPhone** via USB (or pair over Wi-Fi: Window → Devices and
+   Simulators), select it as the run destination in Xcode's toolbar, then hit
+   **Run** (▶).
+7. **First run only**: iOS will refuse to launch an app from an unverified
+   developer. On the iPhone: **Settings → General → VPN & Device Management**
+   → tap your Apple ID under "Developer App" → **Trust**. Also, on iOS 16+,
+   **Developer Mode** must be turned on once: **Settings → Privacy & Security
+   → Developer Mode → toggle on → restart the phone** (it'll prompt on first
+   Xcode install attempt if not already on).
+8. Make sure the backend (`uvicorn src.api:app --host 0.0.0.0 ...`) is
+   running and reachable on that LAN IP — same requirement as Option A.
+
+None of steps 1, 2, 5, 6, 7 can be done by an assistant — they're either an
+App Store account action or require physically holding your iPhone. Steps 3
+and 4 are ready to run once Xcode exists on this machine.
 
 ## 5. Carer mode / User mode, medication alarms, document scanning (OCR)
 
