@@ -13,3 +13,4 @@ tiktoken
 pydantic
 requests
 python-multipart
+pdf2image

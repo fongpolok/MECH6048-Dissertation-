@@ -19,6 +19,15 @@ EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", CONFIG.get("embedding_mode
 TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", CONFIG.get("temperature", 0.3)))
 HK_GUIDELINES = CONFIG.get("hk_guidelines", True)
 
+# Ollama's default context window (2048-4096 depending on model) is too small
+# once you add system prompt + profile + RAG context + chat history — and
+# "thinking" models (qwen3.x) can silently burn the whole budget on invisible
+# <think> reasoning and hit the ceiling before emitting any visible answer
+# (done_reason="length", empty content — reproduced and confirmed via a raw
+# ChatOllama call while debugging an empty-reply report). 16384 gives
+# comfortable headroom; override if you hit it again with a longer chat history.
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", CONFIG.get("ollama_num_ctx", 16384)))
+
 # Vision-capable model for the 掃描 (OCR) tab — reads a photographed HA document
 # and structures it, in one call. Separate from LLM_MODEL because the chat
 # model isn't necessarily multimodal.

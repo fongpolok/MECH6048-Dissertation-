@@ -7,7 +7,7 @@ from langchain.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
 
-from src.config import LLM_MODEL, OLLAMA_HOST, TEMPERATURE
+from src.config import LLM_MODEL, OLLAMA_HOST, OLLAMA_NUM_CTX, TEMPERATURE
 from src.retriever import get_retriever
 from src.tools import alert_caregiver, log_blood_pressure, log_glucose, log_hba1c
 
@@ -46,7 +46,7 @@ class MedicalAgent:
     """
 
     def __init__(self):
-        self.llm = ChatOllama(model=LLM_MODEL, temperature=TEMPERATURE, base_url=OLLAMA_HOST)
+        self.llm = ChatOllama(model=LLM_MODEL, temperature=TEMPERATURE, base_url=OLLAMA_HOST, num_ctx=OLLAMA_NUM_CTX)
         self.retriever = get_retriever()
 
         @tool

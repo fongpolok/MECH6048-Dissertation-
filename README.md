@@ -58,6 +58,11 @@ smoke-test only). Both call `src/agent.py`'s `MedicalAgent.ask()`.
 - Python 3.9+ (3.11 used in Docker)
 - [Ollama](https://ollama.com) installed locally, **or** Docker + Docker Compose
 - Node.js 20+ (only needed to run the React frontend outside Docker)
+- `poppler` (`brew install poppler` / `apt-get install poppler-utils`) — only
+  needed to *re-ingest from scratch* if `data/` contains a scanned PDF with no
+  text layer (see "OCR fallback for scanned PDFs" in `data/SOURCES.md`); the
+  OCR result is cached and committed, so a normal `python -m src.ingest` run
+  or the test suite doesn't need it.
 
 ## 1. Choosing & deploying the LLM with Ollama
 

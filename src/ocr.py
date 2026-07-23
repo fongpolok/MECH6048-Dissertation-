@@ -1,7 +1,16 @@
-"""OCR for the 掃描 (Scan) tab: reads a photographed Hospital Authority document
-(discharge summary, lab report, prescription, appointment notice) with a local
-vision-capable Ollama model and structures it into the shape the frontend's
-ScanTab renders. No cloud OCR service is used — the image never leaves the
+"""OCR, two use cases sharing one local vision model (see src/config.py
+OCR_VISION_MODEL):
+
+1. The 掃描 (Scan) tab: reads a photographed Hospital Authority document
+   (discharge summary, lab report, prescription, appointment notice) and
+   structures it into the shape the frontend's ScanTab renders.
+2. The RAG ingestion pipeline (src/text_processor.py): some PDFs dropped into
+   data/ are scanned images with no real text layer — PyPDFLoader silently
+   extracts nothing from them. transcribe_page() OCRs such a page into plain
+   text so it's still searchable, instead of the document silently
+   contributing zero chunks.
+
+No cloud OCR service is used in either case — the image never leaves the
 machine running Ollama, which matters for medical documents.
 """
 from __future__ import annotations
@@ -63,3 +72,24 @@ def extract_ha_document(image_bytes: bytes) -> dict:
     data.setdefault("issued", "未能識別")
     data.setdefault("sections", [])
     return data
+
+
+TRANSCRIBE_PROMPT = """請將呢張相入面嘅所有文字，準確咁逐字轉錄成文字，用繁體中文，
+盡量保留原本嘅段落、標題同列表結構。如果有表格，用清晰嘅文字方式表達返啲數據，
+例如「欄位：數值」咁樣逐項列出。唔好摘要、唔好加意見或者評論，只需要如實轉錄
+睇到嘅文字內容。如果張相入面完全冇文字，就只回覆「（無文字內容）」。"""
+
+
+def transcribe_page(image_bytes: bytes) -> str:
+    """Plain OCR transcription of one page image — no structuring, just text.
+    Used by the ingestion fallback for scanned PDFs with no text layer."""
+    client = ollama.Client(host=OLLAMA_HOST)
+    try:
+        response = client.chat(
+            model=OCR_VISION_MODEL,
+            messages=[{"role": "user", "content": TRANSCRIBE_PROMPT, "images": [image_bytes]}],
+            options={"temperature": 0.1},
+        )
+    except Exception as exc:
+        raise OCRError(str(exc)) from exc
+    return response["message"]["content"].strip()
