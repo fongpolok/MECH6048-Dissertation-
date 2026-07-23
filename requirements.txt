@@ -12,3 +12,4 @@ pypdf
 tiktoken
 pydantic
 requests
+python-multipart

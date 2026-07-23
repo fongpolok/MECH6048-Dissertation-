@@ -2,13 +2,14 @@ import json
 import os
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
 from src.agent import get_medical_agent
 from src.config import EVAL_REPORT_PATH
+from src.ocr import OCRError, extract_ha_document
 from src.tools import alert_caregiver
 from src.utils import load_event_logs, load_profile, save_event_log, update_event_log
 
@@ -215,6 +216,35 @@ def amend_hba1c_record(record_id: str, req: HbA1cRecordPatch):
 @app.get("/api/events")
 def get_events(limit: int = 50):
     return load_event_logs(limit=limit)
+
+
+MAX_SCAN_UPLOAD_BYTES = 15 * 1024 * 1024  # 15MB — a phone camera photo comfortably fits
+
+
+@app.post("/api/ocr/scan")
+async def ocr_scan(file: UploadFile = File(...)):
+    """Reads a photographed Hospital Authority document (discharge summary, lab
+    report, prescription, appointment notice) with a local vision model and
+    returns it structured. The image itself is not persisted — only the
+    extracted text — since these are medical documents (see src/ocr.py)."""
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="empty file")
+    if len(image_bytes) > MAX_SCAN_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="image too large (max 15MB)")
+    try:
+        doc = extract_ha_document(image_bytes)
+    except OCRError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"OCR failed — is the vision model pulled (`ollama pull qwen2.5vl:7b`) and Ollama running? {exc}",
+        ) from exc
+    return save_event_log("scan_result", doc)
+
+
+@app.get("/api/scans")
+def get_scans(limit: int = 50):
+    return _records_of_type("scan_result", limit)
 
 
 @app.get("/api/eval/latest")

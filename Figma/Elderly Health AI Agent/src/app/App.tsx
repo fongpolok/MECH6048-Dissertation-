@@ -6,6 +6,7 @@ import {
   ChevronRight, Wifi, Battery, Signal, Plus, X,
   TrendingUp, BarChart2, Settings, ChevronLeft,
   ShieldCheck, RefreshCw, CheckCircle2, XCircle, AlertTriangle,
+  Camera, FileText, Loader, Scan, AlarmClock,
 } from "lucide-react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis,
@@ -16,15 +17,22 @@ import {
   logBPRecord, getBPRecords, amendBPRecord,
   logGlucoseRecord, getGlucoseRecords, amendGlucoseRecord,
   logHbA1cRecord, getHbA1cRecords, amendHbA1cRecord,
-  getEvalReport, type ChatTurn, type EvalReport,
+  scanDocument, getScans, getEvalReport, type ChatTurn, type EvalReport,
 } from "./lib/api";
 
-type Tab = "home" | "chat" | "medications" | "records" | "consult" | "settings" | "eval";
+type Mode = "carer" | "user";
+// 醫療 (consult) and 測試 (eval) stay reachable — via Settings, not the bottom
+// tab bar — rather than dropping the features the same "Testing" and
+// "video consult" requirements from earlier asked for. See TabBar/SettingsTab.
+type CarerTab = "home" | "chat" | "medications" | "records" | "scan" | "consult" | "settings" | "eval";
+type UserTab = "home" | "chat";
+type Tab = CarerTab | UserTab;
 type Message = { id: string; role: "user" | "agent"; text: string; time: string; isEmergency?: boolean };
 type Profile = { name: string; age: string; gender: "男" | "女" | "" };
 type BPEntry = { id?: string; date: string; sys: number; dia: number };
 type GlucoseEntry = { id?: string; date: string; value: number };
 type HbA1cEntry = { id?: string; date: string; value: number };
+type ScannedDoc = { id: string; title: string; patient: string; pid: string; issued: string; sections: { label: string; items: string[] }[] };
 
 // Same heuristic the backend uses (src/api.py _is_emergency_reply) — kept in
 // sync so the offline/demo fallback path (no backend reachable) still
@@ -107,11 +115,12 @@ function getAgentResponse(msg: string): string {
 }
 
 // ── Static data ───────────────────────────────────────────────────────────────
+// time24 (HH:MM, 24h) drives the medication alarm — time is just the display string.
 const medications = [
-  { name: "氨氯地平", english: "Amlodipine 5mg", time: "早上 8:00", note: "血壓藥", color: "#007AFF", initially: true },
-  { name: "二甲雙胍", english: "Metformin 500mg", time: "早上 8:00", note: "糖尿藥", color: "#34C759", initially: true },
-  { name: "格列齊特", english: "Gliclazide 30mg", time: "下午 1:00", note: "糖尿藥", color: "#34C759", initially: false },
-  { name: "依那普利", english: "Enalapril 10mg", time: "晚上 8:00", note: "血壓藥", color: "#007AFF", initially: false },
+  { name: "氨氯地平", english: "Amlodipine 5mg", time: "早上 8:00", time24: "08:00", note: "血壓藥", color: "#007AFF", initially: true },
+  { name: "二甲雙胍", english: "Metformin 500mg", time: "早上 8:00", time24: "08:00", note: "糖尿藥", color: "#34C759", initially: true },
+  { name: "格列齊特", english: "Gliclazide 30mg", time: "下午 1:00", time24: "13:00", note: "糖尿藥", color: "#34C759", initially: false },
+  { name: "依那普利", english: "Enalapril 10mg", time: "晚上 8:00", time24: "20:00", note: "血壓藥", color: "#007AFF", initially: false },
 ];
 
 // Daily granularity now — 記錄 tracks day-by-day, not month-by-month. These
@@ -191,16 +200,23 @@ function NavBar({ title, large = false, rightEl }: { title: string; large?: bool
   );
 }
 
-function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void }) {
-  const tabs = [
+// Carer mode gets the full tab bar (including 掃描 OCR scanning); 醫療 and 測試
+// stay reachable from Settings rather than crowding the bar further. User
+// mode is deliberately down to home/chat only — see the V2 design brief.
+function TabBar({ active, onChange, mode }: { active: Tab; onChange: (t: Tab) => void; mode: Mode }) {
+  const carerTabs = [
     { id: "home" as Tab, label: "主頁", icon: Home },
     { id: "chat" as Tab, label: "對話", icon: MessageCircle },
     { id: "medications" as Tab, label: "藥物", icon: Pill },
     { id: "records" as Tab, label: "記錄", icon: TrendingUp },
-    { id: "consult" as Tab, label: "醫療", icon: Stethoscope },
+    { id: "scan" as Tab, label: "掃描", icon: Camera },
     { id: "settings" as Tab, label: "設定", icon: Settings },
-    { id: "eval" as Tab, label: "測試", icon: ShieldCheck },
   ];
+  const userTabs = [
+    { id: "home" as Tab, label: "主頁", icon: Home },
+    { id: "chat" as Tab, label: "對話", icon: MessageCircle },
+  ];
+  const tabs = mode === "carer" ? carerTabs : userTabs;
   return (
     <div className="flex border-t bg-card/90 backdrop-blur-xl pb-safe" style={{ borderColor: "rgba(60,60,67,0.18)", WebkitBackdropFilter: "blur(20px)" }}>
       {tabs.map(t => (
@@ -238,6 +254,92 @@ function Cell({ icon, iconBg, label, sublabel, right, onPress, last = false, dan
       </div>
       {right ?? <ChevronRight className="w-4 h-4 flex-shrink-0" style={{ color: "#C7C7CC" }} />}
     </button>
+  );
+}
+
+// ── Mode Selection Landing ─────────────────────────────────────────────────────
+function ModeLanding({ onSelect }: { onSelect: (m: Mode) => void }) {
+  return (
+    <div className="flex-1 flex flex-col bg-background overflow-hidden">
+      <div className="flex flex-col items-center pt-10 pb-8 px-6"
+        style={{ background: "linear-gradient(180deg, #007AFF 0%, #0055D4 100%)" }}>
+        <div className="w-20 h-20 rounded-[22px] bg-white/20 flex items-center justify-center mb-4 shadow-lg">
+          <Activity className="w-10 h-10 text-white" />
+        </div>
+        <h1 className="text-[28px] font-bold text-white text-center leading-tight">健康伴侶</h1>
+        <p className="text-white/70 text-[15px] text-center mt-1">香港長者健康管理平台</p>
+      </div>
+
+      <div className="flex-1 px-5 py-6 space-y-4 overflow-y-auto" style={{ scrollbarWidth: "none" }}>
+        <p className="text-[13px] font-semibold text-center uppercase mb-2" style={{ color: "#8E8E93", letterSpacing: "0.05em" }}>請選擇使用模式</p>
+
+        {/* Carer mode */}
+        <button onClick={() => onSelect("carer")}
+          className="w-full text-left bg-card rounded-[20px] p-5 border-2 border-transparent active:opacity-80 transition-all"
+          style={{ boxShadow: "0 4px 24px rgba(0,122,255,0.14), 0 0 0 0.5px rgba(60,60,67,0.12)" }}>
+          <div className="flex items-start gap-4">
+            <div className="w-14 h-14 rounded-[14px] flex items-center justify-center flex-shrink-0"
+              style={{ background: "linear-gradient(135deg, #007AFF, #5AC8FA)" }}>
+              <Stethoscope className="w-7 h-7 text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <p className="text-[20px] font-bold text-foreground">照顧者模式</p>
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-[#007AFF]/10 text-[#007AFF]">完整功能</span>
+              </div>
+              <p className="text-[14px] leading-relaxed" style={{ color: "#8E8E93" }}>適合家屬、護理員及醫護人員使用</p>
+              <div className="mt-3 space-y-1.5">
+                {["藥物管理與提醒", "健康數據圖表", "醫院文件掃描 (OCR)", "即時醫療諮詢", "完整設定"].map(f => (
+                  <div key={f} className="flex items-center gap-2">
+                    <Check className="w-3.5 h-3.5 text-[#007AFF] flex-shrink-0" strokeWidth={3} />
+                    <p className="text-[13px] text-foreground">{f}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 w-full py-3 rounded-[12px] text-center text-[15px] font-semibold text-white"
+            style={{ background: "linear-gradient(135deg, #007AFF, #5AC8FA)" }}>
+            以照顧者身份進入
+          </div>
+        </button>
+
+        {/* User mode */}
+        <button onClick={() => onSelect("user")}
+          className="w-full text-left bg-card rounded-[20px] p-5 border-2 border-transparent active:opacity-80 transition-all"
+          style={{ boxShadow: "0 4px 24px rgba(255,149,0,0.12), 0 0 0 0.5px rgba(60,60,67,0.12)" }}>
+          <div className="flex items-start gap-4">
+            <div className="w-14 h-14 rounded-[14px] flex items-center justify-center flex-shrink-0"
+              style={{ background: "linear-gradient(135deg, #FF9500, #FF6D00)" }}>
+              <User className="w-7 h-7 text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <p className="text-[20px] font-bold text-foreground">長者用家模式</p>
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-[#FF9500]/10 text-[#FF9500]">簡化介面</span>
+              </div>
+              <p className="text-[14px] leading-relaxed" style={{ color: "#8E8E93" }}>適合長者自行使用，介面簡單易明</p>
+              <div className="mt-3 space-y-1.5">
+                {["大字體顯示", "AI 語音健康助理", "一鍵緊急求助"].map(f => (
+                  <div key={f} className="flex items-center gap-2">
+                    <Check className="w-3.5 h-3.5 text-[#FF9500] flex-shrink-0" strokeWidth={3} />
+                    <p className="text-[13px] text-foreground">{f}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 w-full py-3 rounded-[12px] text-center text-[15px] font-semibold text-white"
+            style={{ background: "linear-gradient(135deg, #FF9500, #FF6D00)" }}>
+            以長者身份進入
+          </div>
+        </button>
+
+        <p className="text-center text-[12px] pb-2" style={{ color: "#C7C7CC" }}>
+          重新載入應用程式即可切換模式
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -520,8 +622,244 @@ function HbA1cTooltip({ active, payload, label }: { active?: boolean; payload?: 
   );
 }
 
+// ── OCR Scan Tab ──────────────────────────────────────────────────────────────
+// Real backend: photographed document → POST /api/ocr/scan → local vision
+// model (src/ocr.py, qwen2.5vl by default) reads + structures it. History is
+// persisted server-side (GET /api/scans), not just kept in memory.
+function ScanTab() {
+  const [scanState, setScanState] = useState<"idle" | "processing" | "result" | "error">("idle");
+  const [currentDoc, setCurrentDoc] = useState<ScannedDoc | null>(null);
+  const [history, setHistory] = useState<ScannedDoc[]>([]);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    getScans().then(docs => setHistory([...docs].reverse())).catch(err => console.error("Failed to load scan history", err));
+  }, []);
+
+  async function handleCapture(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setPreviewUrl(URL.createObjectURL(file));
+    setScanState("processing");
+    setError(null);
+    try {
+      const doc = await scanDocument(file);
+      setCurrentDoc(doc);
+      setHistory(p => [doc, ...p]);
+      setScanState("result");
+    } catch (err) {
+      console.error("OCR scan failed", err);
+      setError(
+        err instanceof Error && err.message.includes("502")
+          ? "未能辨識文件。後台可能未安裝視覺模型 — 請喺電腦執行 `ollama pull qwen2.5vl:7b`。"
+          : "未能連接後台伺服器，請檢查網絡連線後再試。"
+      );
+      setScanState("error");
+    }
+  }
+
+  function reset() { setScanState("idle"); setCurrentDoc(null); setPreviewUrl(null); setError(null); }
+
+  return (
+    <>
+      <NavBar title="文件掃描" large />
+      <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleCapture} className="hidden" />
+
+      <div className="flex-1 overflow-y-auto" style={{ scrollbarWidth: "none" }}>
+        {/* Idle state */}
+        {scanState === "idle" && (
+          <div className="flex flex-col py-4 pb-6 space-y-5">
+            <div className="mx-4 rounded-[20px] overflow-hidden" style={{ background: "linear-gradient(135deg, #1C1C2E 0%, #2C2C44 100%)" }}>
+              <div className="flex flex-col items-center py-8 px-6">
+                <div className="relative w-36 h-36 mb-5">
+                  <div className="absolute inset-0 rounded-[16px] border-2 border-white/20" />
+                  {[["top-0 left-0", "border-t-2 border-l-2"], ["top-0 right-0", "border-t-2 border-r-2"],
+                    ["bottom-0 left-0", "border-b-2 border-l-2"], ["bottom-0 right-0", "border-b-2 border-r-2"]].map(([pos, b], i) => (
+                    <div key={i} className={`absolute w-6 h-6 ${pos} ${b} border-[#007AFF] rounded-sm`} />
+                  ))}
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <FileText className="w-12 h-12 text-white/30" />
+                  </div>
+                  <div className="absolute left-2 right-2 h-0.5 bg-[#007AFF]/60 animate-bounce" style={{ top: "50%", animationDuration: "2s" }} />
+                </div>
+                <p className="text-white text-[18px] font-bold mb-1">掃描醫院文件</p>
+                <p className="text-white/50 text-[13px] text-center leading-relaxed mb-5">
+                  支援出院摘要、化驗報告<br />及藥物處方
+                </p>
+                <button onClick={() => fileRef.current?.click()}
+                  className="flex items-center gap-2 px-6 py-3.5 rounded-[14px] text-white text-[17px] font-semibold"
+                  style={{ background: "linear-gradient(135deg, #007AFF, #5AC8FA)" }}>
+                  <Camera className="w-5 h-5" />
+                  開啟相機掃描
+                </button>
+              </div>
+              <div className="flex border-t border-white/10">
+                {[{ icon: ShieldCheck, label: "本機處理" }, { icon: Scan, label: "自動識別" }, { icon: FileText, label: "即時解讀" }].map((f, i, arr) => (
+                  <div key={f.label} className={`flex-1 flex flex-col items-center py-3 gap-1 ${i < arr.length - 1 ? "border-r border-white/10" : ""}`}>
+                    <f.icon className="w-4 h-4 text-[#007AFF]" />
+                    <p className="text-[11px] text-white/50">{f.label}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <Section label="支援文件類型">
+              {[
+                { label: "出院摘要", sublabel: "Hospital Authority Discharge Summary", color: "#007AFF" },
+                { label: "化驗報告", sublabel: "Laboratory Test Report", color: "#34C759" },
+                { label: "藥物處方", sublabel: "Prescription / 醫院配藥單", color: "#FF9500" },
+                { label: "覆診通知", sublabel: "Outpatient Appointment Notice", color: "#FF2D55" },
+              ].map((t, i, arr) => (
+                <div key={t.label} className={`flex items-center gap-3 px-4 py-3 ${i < arr.length - 1 ? "border-b" : ""}`}
+                  style={{ borderColor: "rgba(60,60,67,0.12)" }}>
+                  <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: t.color }} />
+                  <div>
+                    <p className="text-[15px] text-foreground">{t.label}</p>
+                    <p className="text-[12px]" style={{ color: "#8E8E93" }}>{t.sublabel}</p>
+                  </div>
+                </div>
+              ))}
+            </Section>
+
+            {history.length > 0 && (
+              <Section label="最近掃描記錄">
+                {history.map((doc, i) => (
+                  <button key={doc.id} onClick={() => { setCurrentDoc(doc); setScanState("result"); }}
+                    className={`w-full flex items-center gap-3 px-4 py-3 text-left ${i < history.length - 1 ? "border-b" : ""}`}
+                    style={{ borderColor: "rgba(60,60,67,0.12)" }}>
+                    <div className="w-9 h-9 rounded-[8px] bg-[#007AFF]/10 flex items-center justify-center flex-shrink-0">
+                      <FileText className="w-5 h-5 text-[#007AFF]" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[15px] text-foreground">{doc.title}</p>
+                      <p className="text-[12px] truncate" style={{ color: "#8E8E93" }}>{doc.issued}</p>
+                    </div>
+                    <ChevronRight className="w-4 h-4 flex-shrink-0" style={{ color: "#C7C7CC" }} />
+                  </button>
+                ))}
+              </Section>
+            )}
+          </div>
+        )}
+
+        {/* Processing state */}
+        {scanState === "processing" && (
+          <div className="flex-1 flex flex-col items-center justify-center min-h-[500px] px-8 gap-6">
+            {previewUrl && (
+              <div className="w-48 h-56 rounded-[16px] overflow-hidden border-2 border-[#007AFF]/30 relative shadow-lg">
+                <img src={previewUrl} alt="掃描中" className="w-full h-full object-cover" />
+                <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+                  <div className="absolute left-0 right-0 h-0.5 bg-[#007AFF] shadow-[0_0_8px_#007AFF]"
+                    style={{ animation: "scan-sweep 1.2s ease-in-out infinite", top: "30%" }} />
+                </div>
+              </div>
+            )}
+            <div className="flex flex-col items-center gap-3">
+              <div className="w-14 h-14 rounded-full bg-[#007AFF]/10 flex items-center justify-center">
+                <Loader className="w-7 h-7 text-[#007AFF] animate-spin" />
+              </div>
+              <p className="text-[20px] font-bold text-foreground">正在辨識文件…</p>
+              <p className="text-[14px] text-center" style={{ color: "#8E8E93" }}>
+                AI 正在本機分析文件內容<br />可能需要10-20秒，請稍候
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Error state */}
+        {scanState === "error" && (
+          <div className="flex-1 flex flex-col items-center justify-center min-h-[500px] px-8 gap-5 text-center">
+            <div className="w-16 h-16 rounded-full bg-[#FF9500]/10 flex items-center justify-center">
+              <AlertTriangle className="w-8 h-8 text-[#FF9500]" />
+            </div>
+            <p className="text-[18px] font-bold text-foreground">未能辨識文件</p>
+            <p className="text-[14px] leading-relaxed" style={{ color: "#8E8E93" }}>{error}</p>
+            <button onClick={reset} className="px-6 py-3 rounded-[14px] text-[#007AFF] text-[15px] font-semibold" style={{ backgroundColor: "#F2F2F7" }}>
+              重新嘗試
+            </button>
+          </div>
+        )}
+
+        {/* Result state */}
+        {scanState === "result" && currentDoc && (
+          <div className="py-4 pb-8 space-y-4">
+            <div className="mx-4 flex items-center gap-3 px-4 py-3.5 rounded-[14px]" style={{ backgroundColor: "#34C75912", border: "1px solid #34C75930" }}>
+              <Check className="w-5 h-5 text-[#34C759] flex-shrink-0" strokeWidth={3} />
+              <div>
+                <p className="text-[15px] font-semibold text-[#34C759]">文件辨識成功</p>
+                <p className="text-[12px]" style={{ color: "#34C759" }}>內容已由本機AI提取，未上傳雲端</p>
+              </div>
+              <button onClick={reset} className="ml-auto">
+                <X className="w-4 h-4" style={{ color: "#8E8E93" }} />
+              </button>
+            </div>
+
+            <div className="mx-4 bg-[#007AFF] rounded-[16px] p-5">
+              <div className="flex items-start gap-3">
+                <div className="w-11 h-11 bg-white/20 rounded-[10px] flex items-center justify-center flex-shrink-0">
+                  <FileText className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <p className="text-white/70 text-[12px] font-medium">醫院管理局</p>
+                  <p className="text-white text-[20px] font-bold leading-tight">{currentDoc.title}</p>
+                  <p className="text-white/70 text-[13px] mt-1">病人：{currentDoc.patient}</p>
+                </div>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                <div className="bg-white/10 rounded-[10px] px-3 py-2">
+                  <p className="text-white/60 text-[11px]">病人編號</p>
+                  <p className="text-white text-[13px] font-semibold">{currentDoc.pid}</p>
+                </div>
+                <div className="bg-white/10 rounded-[10px] px-3 py-2">
+                  <p className="text-white/60 text-[11px]">發出日期</p>
+                  <p className="text-white text-[13px] font-semibold">{currentDoc.issued}</p>
+                </div>
+              </div>
+            </div>
+
+            {currentDoc.sections.map(sec => (
+              <Section key={sec.label} label={sec.label}>
+                {sec.items.map((item, i) => (
+                  <div key={i} className={`px-4 py-3 flex items-start gap-3 ${i < sec.items.length - 1 ? "border-b" : ""}`}
+                    style={{ borderColor: "rgba(60,60,67,0.12)" }}>
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#007AFF] flex-shrink-0 mt-2" />
+                    <p className="text-[15px] text-foreground leading-snug">{item}</p>
+                  </div>
+                ))}
+              </Section>
+            ))}
+
+            <div className="px-4 space-y-3">
+              <button onClick={() => fileRef.current?.click()}
+                className="w-full py-4 rounded-[14px] text-white text-[17px] font-semibold flex items-center justify-center gap-2"
+                style={{ background: "linear-gradient(135deg, #007AFF, #5AC8FA)" }}>
+                <Camera className="w-5 h-5" />
+                掃描另一份文件
+              </button>
+              <button onClick={reset} className="w-full py-3.5 rounded-[14px] text-[17px] font-semibold text-[#007AFF]"
+                style={{ backgroundColor: "#F2F2F7" }}>
+                返回
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+      <style>{`
+        @keyframes scan-sweep {
+          0% { top: 10%; } 50% { top: 85%; } 100% { top: 10%; }
+        }
+      `}</style>
+    </>
+  );
+}
+
 // ── Settings Tab ─────────────────────────────────────────────────────────────
-function SettingsTab({ profile, onSave }: { profile: Profile; onSave: (p: Profile) => void }) {
+function SettingsTab({ profile, mode, onSave, onOpenTab, onSwitchMode }: {
+  profile: Profile; mode: Mode; onSave: (p: Profile) => void; onOpenTab: (t: Tab) => void; onSwitchMode: () => void;
+}) {
   const [name, setName] = useState(profile.name);
   const [age, setAge] = useState(profile.age);
   const [gender, setGender] = useState<"男" | "女" | "">(profile.gender);
@@ -565,7 +903,26 @@ function SettingsTab({ profile, onSave }: { profile: Profile; onSave: (p: Profil
             <p className="text-[20px] font-bold text-foreground">{profile.name}</p>
             <p className="text-[14px]" style={{ color: "#8E8E93" }}>{profile.age} 歲 · {profile.gender}性</p>
           </div>
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full" style={{ backgroundColor: "#007AFF18" }}>
+            <Stethoscope className="w-3.5 h-3.5 text-[#007AFF]" />
+            <p className="text-[12px] font-semibold text-[#007AFF]">照顧者模式</p>
+          </div>
         </div>
+
+        {/* More features — kept out of the bottom tab bar to avoid crowding it */}
+        <Section label="更多功能">
+          <Cell icon={<Stethoscope className="w-5 h-5 text-white" />} iconBg="#5AC8FA"
+            label="醫療諮詢" sublabel="預約視訊問診" onPress={() => onOpenTab("consult")} />
+          <Cell icon={<ShieldCheck className="w-5 h-5 text-white" />} iconBg="#34C759"
+            label="測試同評估" sublabel="LLM準確度／幻覺報告" onPress={() => onOpenTab("eval")} last />
+        </Section>
+
+        {/* Switch to the simplified elderly-user view before handing the phone over */}
+        <Section label="使用模式">
+          <Cell icon={<User className="w-5 h-5 text-white" />} iconBg="#FF9500"
+            label="切換至長者用家模式" sublabel="簡化介面：只顯示主頁同對話"
+            onPress={onSwitchMode} last />
+        </Section>
 
         {/* Personal info form */}
         <div className="space-y-1">
@@ -719,6 +1076,7 @@ function RateBadge({ rate }: { rate: number }) {
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
+  const [mode, setMode] = useState<Mode | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [tab, setTab] = useState<Tab>("home");
   const [messages, setMessages] = useState<Message[]>([{
@@ -743,8 +1101,12 @@ export default function App() {
   const [evalReport, setEvalReport] = useState<EvalReport | null>(null);
   const [evalLoading, setEvalLoading] = useState(false);
   const [evalError, setEvalError] = useState<string | null>(null);
+  const [activeAlarm, setActiveAlarm] = useState<(typeof medications)[number] | null>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognition | null>(null);
+  // Which medication+day alarms already fired, so the interval below (runs
+  // every 30s) doesn't re-trigger the same reminder twice within its minute.
+  const firedAlarmsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, typing]);
 
@@ -756,6 +1118,58 @@ export default function App() {
     getGlucoseRecords().then(records => { if (records.length > 0) setGlucoseData(records); }).catch(() => {});
     getHbA1cRecords().then(records => { if (records.length > 0) setHbData(records); }).catch(() => {});
   }, []);
+
+  // Medication reminder alarm. Foreground-only by nature (checks the device
+  // clock while the app/tab is open) — a closed app can't fire this. A true
+  // background alarm needs a Service Worker + Push API + server-side
+  // scheduler, which is a bigger follow-up (see README, Known extension
+  // points). This covers the common case: app open or backgrounded on an
+  // iPhone/iPad the elderly user or carer keeps nearby.
+  useEffect(() => {
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "default") Notification.requestPermission().catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    function check() {
+      const now = new Date();
+      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      const today = now.toISOString().slice(0, 10);
+      for (const med of medications) {
+        if (med.time24 !== hhmm || taken[med.name]) continue;
+        const key = `${med.name}-${today}-${hhmm}`;
+        if (firedAlarmsRef.current.has(key)) continue;
+        firedAlarmsRef.current.add(key);
+        setActiveAlarm(med);
+        if ("Notification" in window && Notification.permission === "granted") {
+          new Notification("食藥時間到！", { body: `${med.name}（${med.english}）— ${med.time}`, tag: key });
+        }
+      }
+    }
+    check();
+    const interval = setInterval(check, 30000);
+    return () => clearInterval(interval);
+  }, [taken]);
+
+  function markAlarmTaken() {
+    if (!activeAlarm) return;
+    const name = activeAlarm.name;
+    setTaken(p => ({ ...p, [name]: true }));
+    logMedication(name, true).catch(err => console.error("Failed to sync medication log", err));
+    setActiveAlarm(null);
+  }
+
+  function snoozeAlarm() {
+    const med = activeAlarm;
+    setActiveAlarm(null);
+    if (!med) return;
+    setTimeout(() => {
+      setTaken(prev => {
+        if (!prev[med.name]) setActiveAlarm(med);
+        return prev;
+      });
+    }, 10 * 60 * 1000);
+  }
 
   // Save a new record (POST) or amend an existing one (PATCH, when it has an
   // id). Reflects the change locally even if the backend call fails, so the
@@ -834,12 +1248,17 @@ export default function App() {
     try {
       const { reply, is_emergency } = await sendChatMessage(content, history);
       setMessages(p => [...p, { id: (Date.now() + 1).toString(), role: "agent", text: reply, time: now, isEmergency: is_emergency }]);
+      // Don't wait for the user to notice/tap the inline button — surface the
+      // 999/emergency-contacts modal immediately, the moment the reply comes back.
+      if (is_emergency) setSos(true);
     } catch (err) {
       // Backend/Ollama unreachable — fall back to the local offline demo responses
       // so the app (and especially the emergency-symptom flow) never goes silent.
       console.error("Chat API unavailable, using offline demo response", err);
       const fallback = getAgentResponse(content);
-      setMessages(p => [...p, { id: (Date.now() + 1).toString(), role: "agent", text: fallback, time: now, isEmergency: isEmergencyReply(fallback) }]);
+      const emergency = isEmergencyReply(fallback);
+      setMessages(p => [...p, { id: (Date.now() + 1).toString(), role: "agent", text: fallback, time: now, isEmergency: emergency }]);
+      if (emergency) setSos(true);
     } finally {
       setTyping(false);
     }
@@ -872,15 +1291,65 @@ export default function App() {
           </>
         )}
 
+        {/* ── Mode Selection ── */}
+        {!mode && <ModeLanding onSelect={m => { setMode(m); setTab("home"); }} />}
+
         {/* ── Onboarding ── */}
-        {!profile && <OnboardingPage onDone={p => {
+        {mode && !profile && <OnboardingPage onDone={p => {
           setProfile(p);
           setMessages([{ id: "1", role: "agent", text: `${p.name}，早晨！我係您的健康助理，專門幫您管理高血壓同糖尿病。今日感覺點呀？`, time: "上午 9:00" }]);
         }} />}
 
         {/* ── Main app ── */}
-        {profile && (
+        {mode && profile && (
           <>
+            {/* Persistent emergency button — reachable from any tab, in both modes.
+                Sits above tab content but below full-screen modals. */}
+            {!sos && !activeAlarm && (
+              <button
+                onClick={() => setSos(true)}
+                className="absolute z-30 flex items-center justify-center rounded-full shadow-lg active:scale-95 transition-transform"
+                style={{
+                  right: 16, bottom: 84, width: 56, height: 56,
+                  background: "linear-gradient(135deg, #FF3B30, #FF2D55)",
+                  boxShadow: "0 6px 20px rgba(255,59,48,0.45)",
+                }}
+                aria-label="緊急求助"
+              >
+                <Phone className="w-6 h-6 text-white" />
+              </button>
+            )}
+
+            {/* Medication alarm */}
+            {activeAlarm && (
+              <div className="absolute inset-0 z-40 flex flex-col justify-end bg-black/60 backdrop-blur-sm">
+                <div className="bg-card rounded-t-[20px] p-6 pb-8">
+                  <div className="w-12 h-1 bg-gray-300 rounded-full mx-auto mb-6" />
+                  <div className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4" style={{ backgroundColor: activeAlarm.color + "18" }}>
+                    <AlarmClock className="w-8 h-8" style={{ color: activeAlarm.color }} />
+                  </div>
+                  <h2 className="text-[22px] font-bold text-center text-foreground mb-1">食藥時間到！</h2>
+                  <p className="text-center text-[15px] mb-6" style={{ color: "#8E8E93" }}>{activeAlarm.time}</p>
+                  <div className="flex items-center gap-3 p-4 rounded-[12px] mb-6" style={{ backgroundColor: "#F2F2F7" }}>
+                    <div className="w-10 h-10 rounded-[8px] flex items-center justify-center flex-shrink-0" style={{ backgroundColor: activeAlarm.color }}>
+                      <Pill className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                      <p className="text-[17px] font-semibold text-foreground">{activeAlarm.name}</p>
+                      <p className="text-[13px]" style={{ color: "#8E8E93" }}>{activeAlarm.english} · {activeAlarm.note}</p>
+                    </div>
+                  </div>
+                  <button onClick={markAlarmTaken} className="w-full py-4 text-white text-center text-[17px] font-semibold rounded-[14px] mb-3"
+                    style={{ backgroundColor: "#34C759" }}>
+                    ✅ 已服用
+                  </button>
+                  <button onClick={snoozeAlarm} className="w-full py-4 text-center text-[17px] font-semibold rounded-[14px] text-[#007AFF]" style={{ backgroundColor: "#F2F2F7" }}>
+                    ⏰ 10分鐘後提醒
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* SOS */}
             {sos && (
               <div className="absolute inset-0 z-40 flex flex-col justify-end bg-black/60 backdrop-blur-sm">
@@ -973,28 +1442,32 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Vitals summary */}
-                      <div className="mx-4 grid grid-cols-2 gap-3">
-                        <button onClick={() => setTab("records")} className="bg-card rounded-[16px] p-4 text-left" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
-                          <p className="text-[12px] font-semibold mb-2" style={{ color: "#8E8E93" }}>最新血壓</p>
-                          <p className="text-[22px] font-bold text-foreground leading-tight">{latestBP.sys}/{latestBP.dia}</p>
-                          <p className="text-[11px] mb-2" style={{ color: "#8E8E93" }}>mmHg</p>
-                          <span className="text-[12px] font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: bpStatus.color + "18", color: bpStatus.color }}>{bpStatus.label}</span>
-                        </button>
-                        <button onClick={() => setTab("records")} className="bg-card rounded-[16px] p-4 text-left" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
-                          <p className="text-[12px] font-semibold mb-2" style={{ color: "#8E8E93" }}>最新 HbA1c</p>
-                          <p className="text-[22px] font-bold text-foreground leading-tight">{latestHb.value}<span className="text-[14px]">%</span></p>
-                          <p className="text-[11px] mb-2" style={{ color: "#8E8E93" }}>糖化血紅蛋白</p>
-                          <span className="text-[12px] font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: hbStatus.color + "18", color: hbStatus.color }}>{hbStatus.label}</span>
-                        </button>
-                      </div>
+                      {/* Vitals summary (carer only) */}
+                      {mode === "carer" && (
+                        <div className="mx-4 grid grid-cols-2 gap-3">
+                          <button onClick={() => setTab("records")} className="bg-card rounded-[16px] p-4 text-left" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                            <p className="text-[12px] font-semibold mb-2" style={{ color: "#8E8E93" }}>最新血壓</p>
+                            <p className="text-[22px] font-bold text-foreground leading-tight">{latestBP.sys}/{latestBP.dia}</p>
+                            <p className="text-[11px] mb-2" style={{ color: "#8E8E93" }}>mmHg</p>
+                            <span className="text-[12px] font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: bpStatus.color + "18", color: bpStatus.color }}>{bpStatus.label}</span>
+                          </button>
+                          <button onClick={() => setTab("records")} className="bg-card rounded-[16px] p-4 text-left" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                            <p className="text-[12px] font-semibold mb-2" style={{ color: "#8E8E93" }}>最新 HbA1c</p>
+                            <p className="text-[22px] font-bold text-foreground leading-tight">{latestHb.value}<span className="text-[14px]">%</span></p>
+                            <p className="text-[11px] mb-2" style={{ color: "#8E8E93" }}>糖化血紅蛋白</p>
+                            <span className="text-[12px] font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: hbStatus.color + "18", color: hbStatus.color }}>{hbStatus.label}</span>
+                          </button>
+                        </div>
+                      )}
 
-                      {/* Medications summary */}
-                      <Section label="今日藥物">
-                        <Cell icon={<Pill className="w-5 h-5 text-white" />} iconBg="#007AFF"
-                          label={`${takenCount} / ${medications.length} 已服用`} sublabel="點擊查看詳情"
-                          onPress={() => setTab("medications")} last />
-                      </Section>
+                      {/* Medications summary (carer only) */}
+                      {mode === "carer" && (
+                        <Section label="今日藥物">
+                          <Cell icon={<Pill className="w-5 h-5 text-white" />} iconBg="#007AFF"
+                            label={`${takenCount} / ${medications.length} 已服用`} sublabel="點擊查看詳情"
+                            onPress={() => setTab("medications")} last />
+                        </Section>
+                      )}
 
                       {/* Quick chat */}
                       <Section label="快速提問">
@@ -1005,18 +1478,21 @@ export default function App() {
                         ))}
                       </Section>
 
-                      {/* Reminders */}
-                      <Section label="待服藥物">
-                        {medications.filter(m => !taken[m.name]).length === 0
-                          ? <div className="px-4 py-5 text-center text-[15px] text-[#8E8E93]">今日所有藥物已服用 ✓</div>
-                          : medications.filter(m => !taken[m.name]).map((med, i, arr) => (
-                            <Cell key={med.name} icon={<Pill className="w-4 h-4 text-white" />} iconBg={med.color}
-                              label={med.name} sublabel={med.english}
-                              right={<span className="text-[13px] text-[#8E8E93]">{med.time}</span>}
-                              last={i === arr.length - 1} />
-                          ))
-                        }
-                      </Section>
+                      {/* Reminders (carer only — the 主頁 quick-glance list; the elderly
+                          user still gets alarms via the medication reminder modal) */}
+                      {mode === "carer" && (
+                        <Section label="待服藥物">
+                          {medications.filter(m => !taken[m.name]).length === 0
+                            ? <div className="px-4 py-5 text-center text-[15px] text-[#8E8E93]">今日所有藥物已服用 ✓</div>
+                            : medications.filter(m => !taken[m.name]).map((med, i, arr) => (
+                              <Cell key={med.name} icon={<Pill className="w-4 h-4 text-white" />} iconBg={med.color}
+                                label={med.name} sublabel={med.english}
+                                right={<span className="text-[13px] text-[#8E8E93]">{med.time}</span>}
+                                last={i === arr.length - 1} />
+                            ))
+                          }
+                        </Section>
+                      )}
 
                       <Section>
                         <Cell icon={<Phone className="w-5 h-5 text-white" />} iconBg="#FF3B30"
@@ -1130,7 +1606,7 @@ export default function App() {
               )}
 
               {/* ── 藥物 ── */}
-              {tab === "medications" && (
+              {tab === "medications" && mode === "carer" && (
                 <>
                   <NavBar title="藥物時間表" large />
                   <div className="flex-1 overflow-y-auto py-3 space-y-6" style={{ scrollbarWidth: "none" }}>
@@ -1172,7 +1648,7 @@ export default function App() {
               )}
 
               {/* ── 記錄 ── */}
-              {tab === "records" && (
+              {tab === "records" && mode === "carer" && (
                 <>
                   <NavBar title="健康記錄" large />
                   <div className="flex-1 overflow-y-auto py-3 pb-6 space-y-6" style={{ scrollbarWidth: "none" }}>
@@ -1362,7 +1838,7 @@ export default function App() {
               )}
 
               {/* ── 醫療諮詢 ── */}
-              {tab === "consult" && (
+              {tab === "consult" && mode === "carer" && (
                 <>
                   <NavBar title="即時醫療諮詢" large />
                   <div className="flex-1 overflow-y-auto py-3 space-y-6" style={{ scrollbarWidth: "none" }}>
@@ -1419,13 +1895,22 @@ export default function App() {
                 </>
               )}
 
+              {/* ── 掃描 (OCR document scan) ── */}
+              {tab === "scan" && mode === "carer" && <ScanTab />}
+
               {/* ── 設定 ── */}
-              {tab === "settings" && profile && (
-                <SettingsTab profile={profile} onSave={setProfile} />
+              {tab === "settings" && mode === "carer" && (
+                <SettingsTab
+                  profile={profile}
+                  mode={mode}
+                  onSave={setProfile}
+                  onOpenTab={setTab}
+                  onSwitchMode={() => { setMode("user"); setTab("home"); }}
+                />
               )}
 
               {/* ── 測試 (Testing & Hallucination Evaluation) ── */}
-              {tab === "eval" && (
+              {tab === "eval" && mode === "carer" && (
                 <>
                   <NavBar title="測試同評估" large />
                   <div className="flex-1 overflow-y-auto py-3 space-y-6" style={{ scrollbarWidth: "none" }}>
@@ -1547,7 +2032,7 @@ export default function App() {
               )}
             </div>
 
-            <TabBar active={tab} onChange={setTab} />
+            <TabBar active={tab} onChange={setTab} mode={mode} />
           </>
         )}
       </div>

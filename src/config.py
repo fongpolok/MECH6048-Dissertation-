@@ -19,6 +19,11 @@ EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", CONFIG.get("embedding_mode
 TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", CONFIG.get("temperature", 0.3)))
 HK_GUIDELINES = CONFIG.get("hk_guidelines", True)
 
+# Vision-capable model for the 掃描 (OCR) tab — reads a photographed HA document
+# and structures it, in one call. Separate from LLM_MODEL because the chat
+# model isn't necessarily multimodal.
+OCR_VISION_MODEL = os.getenv("OCR_VISION_MODEL", CONFIG.get("ocr_vision_model", "qwen2.5vl:7b"))
+
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 DATA_DIR = PROJECT_ROOT / "data"

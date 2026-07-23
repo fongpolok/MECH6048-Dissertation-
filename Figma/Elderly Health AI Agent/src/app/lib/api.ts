@@ -111,6 +111,35 @@ export function amendHbA1cRecord(id: string, patch: Partial<HbA1cRecord>): Promi
   return request<HbA1cRecord>(`/api/records/hba1c/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 }
 
+// ── OCR document scan (掃描 tab) ────────────────────────────────────────────────
+
+export type ScannedDoc = {
+  id: string;
+  title: string;
+  patient: string;
+  pid: string;
+  issued: string;
+  sections: { label: string; items: string[] }[];
+};
+
+// Not routed through request<T>() — that helper forces
+// Content-Type: application/json, but a multipart upload needs the browser to
+// set its own Content-Type with the multipart boundary.
+export async function scanDocument(file: File | Blob): Promise<ScannedDoc> {
+  const formData = new FormData();
+  formData.append("file", file, file instanceof File ? file.name : "scan.jpg");
+  const res = await fetch(`${API_BASE_URL}/api/ocr/scan`, { method: "POST", body: formData });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`API /api/ocr/scan failed: ${res.status} ${detail}`);
+  }
+  return res.json() as Promise<ScannedDoc>;
+}
+
+export function getScans(): Promise<ScannedDoc[]> {
+  return request<ScannedDoc[]>("/api/scans");
+}
+
 // Mirrors the report shape written by eval/evaluate.py (src/api.py just reads
 // the JSON file straight through).
 export type EvalCaseRun = {

@@ -172,6 +172,40 @@ def test_amend_glucose_record_only_sends_provided_fields(client, monkeypatch):
     assert captured["patch"] == {"value": 5.5}  # date wasn't sent, so it's omitted, not nulled out
 
 
+def test_ocr_scan_returns_structured_doc(client, monkeypatch):
+    doc = {"title": "出院摘要", "patient": "陳大文", "pid": "HA-1", "issued": "2024年6月10日", "sections": []}
+    monkeypatch.setattr(api, "extract_ha_document", lambda image_bytes: doc)
+    monkeypatch.setattr(api, "save_event_log", lambda t, p: {"type": t, **p})
+    res = client.post("/api/ocr/scan", files={"file": ("doc.png", b"fake-image-bytes", "image/png")})
+    assert res.status_code == 200
+    assert res.json() == {"type": "scan_result", **doc}
+
+
+def test_ocr_scan_rejects_empty_file(client):
+    res = client.post("/api/ocr/scan", files={"file": ("doc.png", b"", "image/png")})
+    assert res.status_code == 400
+
+
+def test_ocr_scan_surfaces_vision_model_error(client, monkeypatch):
+    def boom(image_bytes):
+        raise api.OCRError("model \"qwen2.5vl:7b\" not found")
+    monkeypatch.setattr(api, "extract_ha_document", boom)
+    res = client.post("/api/ocr/scan", files={"file": ("doc.png", b"fake-image-bytes", "image/png")})
+    assert res.status_code == 502
+    assert "qwen2.5vl" in res.json()["detail"]
+
+
+def test_get_scans_filters_by_type(client, monkeypatch):
+    events = [
+        {"type": "scan_result", "title": "化驗報告"},
+        {"type": "bp_reading", "date": "2026-07-17", "sys": 128, "dia": 80},
+    ]
+    monkeypatch.setattr(api, "load_event_logs", lambda limit=2000: events)
+    res = client.get("/api/scans")
+    assert res.status_code == 200
+    assert res.json() == [{"type": "scan_result", "title": "化驗報告"}]
+
+
 def test_eval_report_missing_returns_404(client, tmp_path, monkeypatch):
     monkeypatch.setattr(api, "EVAL_REPORT_PATH", tmp_path / "does_not_exist.json")
     res = client.get("/api/eval/latest")

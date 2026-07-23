@@ -9,32 +9,39 @@ readings and alert a caregiver.
 
 ```
 Figma/Elderly Health AI Agent/   THE product UI — the real iOS-style app from
-                                  https://www.figma.com/make/.../Elderly-Health-AI-Agent
-                                  (React + Vite + Tailwind, iPhone-shell mockup).
-                                  6 tabs: 主頁/對話/藥物/健康/醫療/測試. The 對話 tab
-                                  is where the LLM agent lives; 測試 shows the
-                                  accuracy/hallucination eval report. Talks to the
-                                  backend over HTTP via src/app/lib/api.ts.
+                                  Figma Make (React + Vite + Tailwind, iPhone-
+                                  shell mockup). Lands on a 照顧者/長者 (Carer/
+                                  User) mode picker. Carer mode: 主頁/對話/藥物/
+                                  記錄/掃描/設定, with 醫療 and 測試 reachable from
+                                  設定. User mode: 主頁/對話 only, plus a
+                                  persistent emergency button on every screen.
+                                  Talks to the backend over HTTP via
+                                  src/app/lib/api.ts.
         |
-        |  fetch() /api/chat, /api/medications/log, /api/wellness, /api/alert,
-        |  /api/eval/latest
+        |  fetch()/multipart: /api/chat, /api/medications/log, /api/records/*,
+        |  /api/alert, /api/ocr/scan, /api/eval/latest
         v
 src/api.py                       FastAPI backend. Thin HTTP wrapper around the
-                                  agent + tools + JSONL logs + eval report.
+                                  agent + tools + JSONL logs + OCR + eval report.
         |
         v
 src/agent.py                     LangChain tool-calling agent: ChatOllama (LLM)
                                   + always-on RAG retrieval + log_blood_pressure /
-                                  log_glucose / alert_caregiver / search_hk_guidelines
-                                  tools. System prompt enforces Cantonese, guideline
-                                  grounding, and a 999-first rule for red-flag symptoms.
+                                  log_glucose / log_hba1c / alert_caregiver /
+                                  search_hk_guidelines tools. System prompt
+                                  enforces Cantonese, guideline grounding, and a
+                                  999-first rule for red-flag symptoms.
         |
         v
 src/vector_store.py, retriever.py   Chroma DB embedded with OllamaEmbeddings,
                                      built from data/*.pdf via src/ingest.py.
+src/ocr.py                          掃描 tab: photographed HA document → a local
+                                     vision model (qwen2.5vl by default) →
+                                     structured JSON. Runs entirely on-device.
         |
         v
-Ollama (local or docker service)    Runs the chat model + embedding model.
+Ollama (local or docker service)    Runs the chat model, embedding model, and
+                                     vision (OCR) model.
 
 app.py                            Secondary single-file Streamlit UI, same agent —
                                    a quick way to sanity-check the backend without
@@ -342,14 +349,86 @@ path, install Xcode from the App Store first, then ask for the Capacitor
 setup (`npm install @capacitor/core @capacitor/ios`, `npx cap add ios`,
 `npx cap open ios`).
 
+## 5. Carer mode / User mode, medication alarms, document scanning (OCR)
+
+### Carer mode vs. User mode
+
+The app opens on a mode picker (`ModeLanding` in `App.tsx`):
+
+- **照顧者模式 (Carer mode)** — full app: 主頁/對話/藥物/記錄/掃描/設定 in the
+  bottom tab bar, plus 醫療諮詢 and 測試同評估 reachable as list items inside
+  設定 (kept off the tab bar itself so it doesn't get crowded — 8 tabs on a
+  375px-wide bar was too dense to be usable).
+- **長者用家模式 (User mode)** — deliberately just 主頁 and 對話. No settings,
+  no mode-switch button, by design: the elderly user shouldn't be able to
+  accidentally navigate into carer-only screens. A carer switches *to* user
+  mode from inside 設定 before handing the phone over; switching back is a
+  page reload (mode isn't persisted to localStorage — this is intentional,
+  it's the "handoff" mechanism, not an oversight).
+- Regardless of mode, a **persistent red emergency button** floats above tab
+  content on every screen, and the chat automatically opens the 999/emergency-
+  contacts modal the instant a reply is flagged as an emergency (see below) —
+  the user never has to go find an emergency affordance.
+
+### Medication reminder alarms
+
+`App.tsx` checks the device clock every 30 seconds against each medication's
+`time24` (24h `HH:MM`, alongside the existing display string). When a
+scheduled time is reached and that medication isn't yet marked taken, it:
+
+- Shows a full-screen alarm modal (✅ 已服用 marks it taken and logs via the
+  same `/api/medications/log` call the Medications tab uses; ⏰ 10分鐘後提醒
+  snoozes and re-shows it in 10 minutes).
+- Fires a browser `Notification` if permission was granted (requested once on
+  first load).
+
+**This is foreground-only** — it works while the app/tab is open (including
+backgrounded on iOS for a while), but a fully closed app won't alarm. A
+background alarm that survives the app being closed needs a Service Worker +
+Push API + a server-side scheduler that actually sends the push at the right
+time — a materially bigger project, not implemented here. If you need that,
+say so and it can be scoped separately.
+
+### Document scanning (掃描 / OCR)
+
+The 掃描 tab captures a photo (`<input type="file" capture="environment">`,
+opens the phone camera directly) of a Hospital Authority document — discharge
+summary, lab report, prescription, appointment notice — and sends it to
+`POST /api/ocr/scan`. `src/ocr.py` reads it with a **local, vision-capable
+Ollama model** (`qwen2.5vl:7b` by default, override with `OCR_VISION_MODEL`)
+and returns it structured (title/patient/pid/issued date/sections), using
+Ollama's JSON mode for reliability. The image itself is never persisted —
+only the extracted text, saved to the same event log the other 紀錄 use
+(`GET /api/scans` for history).
+
+Setup:
+
+```bash
+ollama pull qwen2.5vl:7b   # ~6GB; already pulled if you're on this dev machine
+```
+
+If the model isn't pulled, `/api/ocr/scan` returns a 502 with a message
+telling the carer exactly what to run — the frontend surfaces that error
+directly in the 掃描 tab rather than failing silently.
+
+Tested with a synthetic document image end-to-end (upload → vision model →
+structured JSON → persisted event) — see `tests/test_api.py` for the mocked
+contract tests and the conversation history for the live run. Not yet tested
+against a real photographed HA document from an actual phone camera (varying
+lighting/angle/glare) — worth doing before relying on this for real intake.
+
 ## Known extension points
 
 - `alert_caregiver` (`src/tools.py`) currently only logs to stdout — wire it
   to a real SMS/push provider (Twilio, FCM, etc.) before relying on it.
 - Event logs are a flat JSONL file (`data/events_log.jsonl`, one entry per
-  medication/BP/glucose/HbA1c/wellness event with a unique id so entries can
-  be amended in place) — fine for a prototype/single user, swap for a real DB
-  (with per-user IDs) for multi-user deployment.
+  medication/BP/glucose/HbA1c/wellness/scan event with a unique id so entries
+  can be amended in place) — fine for a prototype/single user, swap for a
+  real DB (with per-user IDs) for multi-user deployment.
+- Medication alarms are foreground-only (see above) — background push is a
+  real follow-up, not a small tweak.
+- `qwen2.5vl:7b` hasn't been benchmarked against real (not synthetic) HA
+  document photos — accuracy on glare/skew/handwriting is unverified.
 - `user_profile.json` is a single hardcoded profile used server-side for the
   LLM's context (conditions, medications, caregiver phone). The frontend's
   onboarding flow (name/age/gender) is currently local-only and not synced to
