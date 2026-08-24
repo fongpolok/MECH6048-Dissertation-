@@ -4,6 +4,10 @@ uvicorn[standard]
 langchain
 langchain-community
 langchain-ollama
+ollama
+langchain-anthropic
+langchain-google-genai
+langchain-deepseek
 langchain-chroma
 langchain-text-splitters
 chromadb
@@ -14,3 +18,4 @@ pydantic
 requests
 python-multipart
 pdf2image
+openpyxl

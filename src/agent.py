@@ -5,9 +5,9 @@ import os
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_ollama import ChatOllama
 
-from src.config import LLM_MODEL, OLLAMA_HOST, OLLAMA_NUM_CTX, TEMPERATURE
+from src.config import TEMPERATURE
+from src.providers import build_chat_model
 from src.retriever import get_retriever
 from src.tools import alert_caregiver, log_blood_pressure, log_glucose, log_hba1c
 
@@ -45,8 +45,10 @@ class MedicalAgent:
     can issue a follow-up, more targeted query mid-reasoning if it needs to.
     """
 
-    def __init__(self):
-        self.llm = ChatOllama(model=LLM_MODEL, temperature=TEMPERATURE, base_url=OLLAMA_HOST, num_ctx=OLLAMA_NUM_CTX)
+    def __init__(self, provider: str, model: str):
+        self.provider = provider
+        self.model = model
+        self.llm = build_chat_model(provider, model, TEMPERATURE)
         self.retriever = get_retriever()
 
         @tool
@@ -98,6 +100,18 @@ class MedicalAgent:
             # src/tools.py), so fall back to that instead of showing nothing.
             answer = "\n".join(step[1] for step in steps if isinstance(step[1], str)) or answer
 
+        # Safety-critical guardrail, not just a style fallback: alert_caregiver
+        # exists for urgent symptoms *in addition to* telling the user to call
+        # 999 (system prompt rule 3) — a caregiver notification is never a
+        # substitute for that, since the caregiver may not see it in time.
+        # Confirmed via eval regression (severe_breathlessness case): the model
+        # called alert_caregiver, emitted no closing text, and the fallback
+        # above then surfaced only the tool's own confirmation string — which
+        # never mentions 999 — as the entire reply. Enforced deterministically
+        # here rather than trusting the model to remember it every time.
+        if "alert_caregiver" in tool_calls and "999" not in answer:
+            answer = "請即刻打999或者用APP入面嘅「緊急求助」按鈕求助！\n\n" + answer
+
         return {
             "answer": answer,
             "sources": sources,
@@ -106,16 +120,28 @@ class MedicalAgent:
         }
 
 
-_agent_singleton: MedicalAgent | None = None
+_agents: dict[tuple[str, str], MedicalAgent] = {}
 
 
-def get_medical_agent() -> MedicalAgent:
-    """Build the agent once and reuse it — constructing ChatOllama/the retriever per
-    request would reconnect to Ollama and reopen the Chroma DB on every chat message."""
-    global _agent_singleton
-    if _agent_singleton is None:
-        _agent_singleton = MedicalAgent()
-    return _agent_singleton
+def get_medical_agent(provider: str | None = None, model: str | None = None) -> MedicalAgent:
+    """Build an agent once per (provider, model) and reuse it — constructing a
+    chat client/the retriever per request would reconnect on every chat message.
+
+    Cached per-pair rather than as a single singleton because the Settings tab
+    lets the user switch models at runtime, and the eval harnesses compare
+    several providers in one process — both need more than one live agent.
+    """
+    from src.utils import load_model_selection  # local import: avoids a cycle at module load time
+
+    if provider is None or model is None:
+        selection = load_model_selection()
+        provider = provider or selection["provider"]
+        model = model or selection["model"]
+
+    key = (provider, model)
+    if key not in _agents:
+        _agents[key] = MedicalAgent(provider, model)
+    return _agents[key]
 
 
 def create_medical_agent() -> MedicalAgent:

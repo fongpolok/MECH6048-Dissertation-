@@ -8,10 +8,19 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
 from src.agent import get_medical_agent
-from src.config import EVAL_REPORT_PATH
+from src.config import EVAL_REPORT_PATH, HALLUCINATION_EVAL_REPORT_PATH, OCR_EVAL_REPORT_PATH
 from src.ocr import OCRError, extract_ha_document
+from src.providers import PROVIDERS, is_provider_available, list_providers
 from src.tools import alert_caregiver
-from src.utils import load_event_logs, load_profile, save_event_log, update_event_log
+from src.utils import (
+    load_event_logs,
+    load_model_selection,
+    load_profile,
+    save_event_log,
+    save_model_selection,
+    set_api_key,
+    update_event_log,
+)
 
 # The system prompt (rule #3) requires the agent to lead with "call 999" for
 # red-flag symptoms — "first thing, before discussing anything else". So a
@@ -61,6 +70,16 @@ class ChatResponse(BaseModel):
 
 class AlertRequest(BaseModel):
     message: str
+
+
+class ModelSelectionRequest(BaseModel):
+    provider: str
+    model: str
+
+
+class ApiKeyRequest(BaseModel):
+    provider: str
+    api_key: str
 
 
 class MedicationEvent(BaseModel):
@@ -247,15 +266,74 @@ def get_scans(limit: int = 50):
     return _records_of_type("scan_result", limit)
 
 
+def _serve_report(path, run_hint: str):
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"No report yet. Run `{run_hint}` on the backend host first.")
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 @app.get("/api/eval/latest")
 def get_eval_report():
     """Serves the last `python -m eval.evaluate` run (accuracy / hallucination /
-    safety-critical pass rates) for the app's Testing tab. Static file, not a
-    live re-run — a full pass takes minutes against a real Ollama model."""
-    if not EVAL_REPORT_PATH.exists():
+    safety-critical pass rates, with per-case claim/evidence/reasoning and
+    latency) for the app's Testing tab. Static file, not a live re-run — a full
+    pass takes minutes against a real LLM."""
+    return _serve_report(EVAL_REPORT_PATH, "python -m eval.evaluate")
+
+
+@app.get("/api/eval/ocr")
+def get_ocr_eval_report():
+    """Serves the last `python -m eval.ocr_cer` run (Character Error Rate of
+    the OCR vision model against known ground-truth text) for the Testing tab."""
+    return _serve_report(OCR_EVAL_REPORT_PATH, "python -m eval.ocr_cer")
+
+
+@app.get("/api/eval/hallucination")
+def get_hallucination_eval_report():
+    """Serves the last `python -m eval.hallucination_csv_eval` run — the
+    100-question dm_ht_hk_elderly_questions.csv hallucination-risk stress test,
+    with per-question claim/evidence/reasoning, latency, and category breakdown."""
+    return _serve_report(HALLUCINATION_EVAL_REPORT_PATH, "python -m eval.hallucination_csv_eval")
+
+
+@app.get("/api/models")
+def get_models():
+    """Provider/model catalog for the Settings tab dropdown, each flagged
+    `available` if its API key env var is actually set (see src/providers.py) —
+    lets the UI grey out options that would otherwise 502."""
+    return {"providers": list_providers(), "current": load_model_selection()}
+
+
+@app.post("/api/models/select")
+def select_model(req: ModelSelectionRequest):
+    if req.provider not in PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"unknown provider: {req.provider!r}")
+    model_ids = {m["id"] for m in PROVIDERS[req.provider]["models"]}
+    if req.model not in model_ids:
+        raise HTTPException(status_code=400, detail=f"unknown model {req.model!r} for provider {req.provider!r}")
+    if not is_provider_available(req.provider):
+        needs_key = PROVIDERS[req.provider]["needs_key"]
         raise HTTPException(
-            status_code=404,
-            detail="No evaluation report yet. Run `python -m eval.evaluate` on the backend host first.",
+            status_code=400,
+            detail=f"{needs_key} is not configured on the backend — cannot switch to this provider yet.",
         )
-    with open(EVAL_REPORT_PATH, encoding="utf-8") as f:
-        return json.load(f)
+    return save_model_selection(req.provider, req.model)
+
+
+@app.post("/api/models/api-key")
+def set_provider_api_key(req: ApiKeyRequest):
+    """Lets a user configure a cloud provider (e.g. DeepSeek) from the
+    Settings tab instead of editing .env by hand on the backend host. The key
+    is written server-side only (see src/utils.py set_api_key) — this
+    endpoint never echoes it back; the response is just the refreshed
+    provider catalog so the UI can show the provider as available."""
+    if req.provider not in PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"unknown provider: {req.provider!r}")
+    if PROVIDERS[req.provider]["needs_key"] is None:
+        raise HTTPException(status_code=400, detail=f"provider {req.provider!r} does not use an API key")
+    try:
+        set_api_key(req.provider, req.api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"providers": list_providers(), "current": load_model_selection()}

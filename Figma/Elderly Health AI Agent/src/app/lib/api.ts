@@ -146,8 +146,15 @@ export type EvalCaseRun = {
   answer: string;
   sources: string[];
   tool_calls: string[];
+  latency_ms: number;
   pass: boolean;
   reasons: string[];
+  // What the model asserted (claim), what guideline text actually grounded it
+  // (evidence), and why the automated check passed/failed (reasoning) — shown
+  // for every case, not just failures, so a PASS can be audited too.
+  claim: string;
+  evidence: string;
+  reasoning: string;
 };
 
 export type EvalCase = {
@@ -155,6 +162,7 @@ export type EvalCase = {
   category: string;
   question: string;
   pass_rate: number;
+  mean_latency_ms: number;
   runs: EvalCaseRun[];
 };
 
@@ -162,15 +170,121 @@ export type EvalSummary = {
   overall_pass_rate: number;
   by_category: Record<string, number>;
   hallucination_related_pass_rate: number | null;
+  mean_latency_ms: number;
 };
 
 export type EvalReport = {
   testset: string;
   repeat: number;
+  provider: string;
+  model: string;
   summary: EvalSummary;
   cases: EvalCase[];
 };
 
 export function getEvalReport(): Promise<EvalReport> {
   return request<EvalReport>("/api/eval/latest");
+}
+
+// Mirrors eval/ocr_cer.py's report — Character Error Rate of the OCR vision
+// model against pages with known ground-truth text.
+export type OcrEvalCase = {
+  id: string;
+  label: string;
+  reference: string;
+  hypothesis: string;
+  cer: number;
+  accuracy: number;
+};
+
+export type OcrEvalReport = {
+  model: string;
+  testset: string;
+  summary: { mean_cer: number; mean_accuracy: number; case_count: number };
+  cases: OcrEvalCase[];
+};
+
+export function getOcrEvalReport(): Promise<OcrEvalReport> {
+  return request<OcrEvalReport>("/api/eval/ocr");
+}
+
+// Mirrors eval/hallucination_csv_eval.py's report — the 100-question
+// dm_ht_hk_elderly_questions.csv hallucination-risk stress test, graded by an
+// LLM judge (see eval/judge.py) since these questions have no fixed
+// expected-answer string to match against.
+export type HallucinationCase = {
+  id: string;
+  category: string;
+  hallucination_risk_focus: string;
+  question: string;
+  answer: string;
+  sources: string[];
+  evidence: string;
+  claim: string;
+  hallucinated: boolean | null;
+  reasoning: string;
+  latency_ms: number;
+};
+
+export type HallucinationSummary = {
+  question_count: number;
+  graded_count: number;
+  ungraded_count: number;
+  hallucination_rate: number | null;
+  hallucination_rate_by_category: Record<string, number>;
+  mean_latency_ms: number;
+  p95_latency_ms: number;
+};
+
+export type HallucinationReport = {
+  csv: string;
+  provider: string;
+  model: string;
+  judge_provider: string;
+  judge_model: string;
+  summary: HallucinationSummary;
+  cases: HallucinationCase[];
+};
+
+export function getHallucinationReport(): Promise<HallucinationReport> {
+  return request<HallucinationReport>("/api/eval/hallucination");
+}
+
+// Mirrors src/providers.py's catalog — every selectable (provider, model)
+// pair for the Settings tab dropdown, each flagged `available` if its API key
+// is actually configured on the backend.
+export type ModelOption = { id: string; label: string };
+
+export type ProviderOption = {
+  id: string;
+  label: string;
+  available: boolean;
+  needs_key: string | null;
+  models: ModelOption[];
+};
+
+export type ModelSelection = { provider: string; model: string };
+
+export type ModelsResponse = { providers: ProviderOption[]; current: ModelSelection };
+
+export function getModels(): Promise<ModelsResponse> {
+  return request<ModelsResponse>("/api/models");
+}
+
+export function selectModel(provider: string, model: string): Promise<ModelSelection> {
+  return request<ModelSelection>("/api/models/select", {
+    method: "POST",
+    body: JSON.stringify({ provider, model }),
+  });
+}
+
+// Configures a cloud provider's API key (e.g. DeepSeek) from the Settings
+// tab instead of editing .env by hand — the key is written server-side only
+// (see src/utils.py set_api_key) and never sent back; the response is just
+// the refreshed provider/model catalog.
+export function setProviderApiKey(provider: string, apiKey: string): Promise<ModelsResponse> {
+  return request<ModelsResponse>("/api/models/api-key", {
+    method: "POST",
+    body: JSON.stringify({ provider, api_key: apiKey }),
+  });
 }

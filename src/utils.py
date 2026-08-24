@@ -1,18 +1,72 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.config import DATA_DIR, PROFILE_PATH
+from src.config import DATA_DIR, MODEL_SETTINGS_PATH, PROFILE_PATH, PROJECT_ROOT
+from src.providers import DEFAULT_MODEL, DEFAULT_PROVIDER, PROVIDERS
 
 EVENTS_LOG_PATH = DATA_DIR / "events_log.jsonl"
+ENV_PATH = PROJECT_ROOT / ".env"
 
 
 def load_profile() -> dict:
     with open(PROFILE_PATH, encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_model_selection() -> dict:
+    """Which (provider, model) the chat agent should use — see src/providers.py.
+    Falls back to the local Ollama default if nothing has been selected yet."""
+    if not MODEL_SETTINGS_PATH.exists():
+        return {"provider": DEFAULT_PROVIDER, "model": DEFAULT_MODEL}
+    with open(MODEL_SETTINGS_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_model_selection(provider: str, model: str) -> dict:
+    selection = {"provider": provider, "model": model}
+    with open(MODEL_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(selection, f, ensure_ascii=False, indent=2)
+    return selection
+
+
+def set_api_key(provider: str, api_key: str) -> None:
+    """Persists an API key for a cloud provider (ANTHROPIC_API_KEY /
+    GOOGLE_API_KEY / DEEPSEEK_API_KEY — see src/providers.py PROVIDERS) so a
+    key entered once in Settings survives a backend restart, using the same
+    env var each provider's SDK already reads via os.getenv. Written to .env,
+    which is gitignored (see .gitignore) — never committed, never echoed back
+    to the frontend afterwards, only whether the provider is `available`.
+
+    Sets os.environ immediately too, so the key works for the rest of this
+    process without waiting for a restart to pick up the .env change.
+    """
+    if provider not in PROVIDERS:
+        raise ValueError(f"unknown provider: {provider!r}")
+    env_var = PROVIDERS[provider]["needs_key"]
+    if not env_var:
+        raise ValueError(f"provider {provider!r} does not use an API key")
+
+    api_key = api_key.strip()
+    if not api_key:
+        raise ValueError("api_key must not be empty")
+
+    os.environ[env_var] = api_key
+
+    lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
+    pattern = re.compile(rf"^{re.escape(env_var)}=")
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            lines[i] = f"{env_var}={api_key}"
+            break
+    else:
+        lines.append(f"{env_var}={api_key}")
+    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _append_jsonl(path: Path, entry: dict) -> dict:

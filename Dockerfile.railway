@@ -1,0 +1,23 @@
+# Self-contained image for hosting the backend: the original Dockerfile
+# expects Ollama as a separate docker-compose service (OLLAMA_HOST=http://ollama:11434).
+# This bundles a lightweight Ollama instance for embeddings only — chat goes
+# to DeepSeek's API instead of a locally-run chat model.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && curl -fsSL https://ollama.com/install.sh | sh \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ENV OLLAMA_HOST=http://localhost:11434
+RUN chmod +x entrypoint.railway.sh
+
+EXPOSE 8000
+CMD ["./entrypoint.railway.sh"]

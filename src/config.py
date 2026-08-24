@@ -39,3 +39,9 @@ DATA_DIR = PROJECT_ROOT / "data"
 CHROMA_DIR = PROJECT_ROOT / "chroma_db"
 PROFILE_PATH = PROJECT_ROOT / "user_profile.json"
 EVAL_REPORT_PATH = PROJECT_ROOT / "eval" / "results" / "latest.json"
+OCR_EVAL_REPORT_PATH = PROJECT_ROOT / "eval" / "results" / "ocr_latest.json"
+HALLUCINATION_EVAL_REPORT_PATH = PROJECT_ROOT / "eval" / "results" / "csv_hallucination_latest.json"
+
+# Which chat LLM (provider, model) is currently active — see src/providers.py.
+# Persisted so a choice made in Settings survives a backend restart.
+MODEL_SETTINGS_PATH = PROJECT_ROOT / "model_settings.json"

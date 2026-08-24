@@ -6,7 +6,8 @@ import {
   ChevronRight, Wifi, Battery, Signal, Plus, X,
   TrendingUp, BarChart2, Settings, ChevronLeft,
   ShieldCheck, RefreshCw, CheckCircle2, XCircle, AlertTriangle,
-  Camera, FileText, Loader, Scan, AlarmClock,
+  Camera, FileText, Loader, Scan, AlarmClock, ChevronDown, ScanText, Cpu,
+  KeyRound, Eye, EyeOff,
 } from "lucide-react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis,
@@ -17,7 +18,11 @@ import {
   logBPRecord, getBPRecords, amendBPRecord,
   logGlucoseRecord, getGlucoseRecords, amendGlucoseRecord,
   logHbA1cRecord, getHbA1cRecords, amendHbA1cRecord,
-  scanDocument, getScans, getEvalReport, type ChatTurn, type EvalReport,
+  scanDocument, getScans,
+  getEvalReport, getOcrEvalReport, getHallucinationReport,
+  getModels, selectModel, setProviderApiKey,
+  type ChatTurn, type EvalReport, type OcrEvalReport, type HallucinationReport,
+  type ModelsResponse,
 } from "./lib/api";
 
 type Mode = "carer" | "user";
@@ -79,9 +84,33 @@ const evalCategoryLabels: Record<string, string> = {
   tool_claim_consistency: "工具動作一致性 (Tool-Claim)",
 };
 
+// Chinese labels for dm_ht_hk_elderly_questions.csv's 10 categories.
+const hallucinationCategoryLabels: Record<string, string> = {
+  "Medication Dosage": "藥物劑量",
+  "Drug Interactions": "藥物相互作用",
+  "Diet": "飲食",
+  "Symptom Triage": "徵狀分流",
+  "Monitoring": "監測",
+  "Complications & Aftercare": "併發症與善後護理",
+  "Emergency": "緊急情況",
+  "Policy/Scheme": "政策／計劃",
+  "Statistics": "統計數字",
+  "Myths & Beliefs": "迷思與謬誤",
+};
+
 function rateColor(rate: number): string {
   if (rate >= 0.9) return "#34C759";
   if (rate >= 0.5) return "#FF9500";
+  return "#FF3B30";
+}
+
+// Hallucination RATE coloring is inverted from pass-RATE coloring (rateColor
+// above): for a pass rate, higher is better and green; for a hallucination
+// rate, LOWER is better and green — reusing rateColor on a hallucination rate
+// would paint a dangerous 90% hallucination rate green.
+function hallucinationRateColor(rate: number): string {
+  if (rate <= 0.05) return "#34C759";
+  if (rate <= 0.2) return "#FF9500";
   return "#FF3B30";
 }
 
@@ -188,12 +217,24 @@ function StatusBar() {
   );
 }
 
-function NavBar({ title, large = false, rightEl }: { title: string; large?: boolean; rightEl?: React.ReactNode }) {
+// Accessible colour tokens for 長者用家模式 (elder/patient mode) — darker
+// variants of the brand palette chosen to clear WCAG AA (4.5:1) or AAA (7:1)
+// contrast against white. Measured contrast ratios of the default brand
+// colours against white: #007AFF ≈ 4.0:1, #FF3B30 ≈ 3.55:1, #8E8E93 ≈ 2.5:1 —
+// all fail plain-text AA (4.5:1), which is unacceptable for elderly/low-vision
+// users even though they pass at large-text-only AA (3:1). Carer mode keeps
+// the original brand palette; these only apply where mode === "user".
+const ELDER_BLUE = "#0051D4"; // ~6.7:1 vs white
+const ELDER_RED = "#B00020"; // ~7.3:1 vs white (same red Material Design uses for its accessible "error" token)
+const ELDER_MUTED = "#48484A"; // ~8.8:1 vs white, replaces #8E8E93 (~2.5:1, fails AA outright)
+const ELDER_FOCUS_RING = "focus-visible:outline focus-visible:outline-4 focus-visible:outline-offset-2 focus-visible:outline-[#0051D4]";
+
+function NavBar({ title, large = false, elder = false, rightEl }: { title: string; large?: boolean; elder?: boolean; rightEl?: React.ReactNode }) {
   return (
     <div className="bg-card/80 backdrop-blur-xl border-b border-border px-4 pb-3 flex items-end justify-between" style={{ WebkitBackdropFilter: "blur(20px)" }}>
       {large
         ? <h1 className="text-[34px] font-bold text-foreground tracking-tight leading-tight">{title}</h1>
-        : <h1 className="flex-1 text-[17px] font-semibold text-foreground text-center">{title}</h1>
+        : <h1 className={`flex-1 font-bold text-foreground text-center ${elder ? "text-[26px]" : "text-[17px] font-semibold"}`}>{title}</h1>
       }
       {rightEl && <div className="ml-2">{rightEl}</div>}
     </div>
@@ -203,6 +244,9 @@ function NavBar({ title, large = false, rightEl }: { title: string; large?: bool
 // Carer mode gets the full tab bar (including 掃描 OCR scanning); 醫療 and 測試
 // stay reachable from Settings rather than crowding the bar further. User
 // mode is deliberately down to home/chat only — see the V2 design brief.
+// User mode also gets larger touch targets/labels/contrast (WCAG AA++, elder
+// usability) since this bar is permanently on-screen during the redesigned
+// accessible chat — see the Chat tab below for the full rationale.
 function TabBar({ active, onChange, mode }: { active: Tab; onChange: (t: Tab) => void; mode: Mode }) {
   const carerTabs = [
     { id: "home" as Tab, label: "主頁", icon: Home },
@@ -216,13 +260,21 @@ function TabBar({ active, onChange, mode }: { active: Tab; onChange: (t: Tab) =>
     { id: "home" as Tab, label: "主頁", icon: Home },
     { id: "chat" as Tab, label: "對話", icon: MessageCircle },
   ];
-  const tabs = mode === "carer" ? carerTabs : userTabs;
+  const elder = mode === "user";
+  const tabs = elder ? userTabs : carerTabs;
+  const activeColor = elder ? ELDER_BLUE : "#007AFF";
+  const inactiveColor = elder ? ELDER_MUTED : "#8E8E93";
   return (
     <div className="flex border-t bg-card/90 backdrop-blur-xl pb-safe" style={{ borderColor: "rgba(60,60,67,0.18)", WebkitBackdropFilter: "blur(20px)" }}>
       {tabs.map(t => (
-        <button key={t.id} onClick={() => onChange(t.id)} className="flex-1 flex flex-col items-center gap-0.5 py-1.5 transition-opacity">
-          <t.icon className="w-5 h-5 transition-colors" style={{ color: active === t.id ? "#007AFF" : "#8E8E93" }} strokeWidth={active === t.id ? 2.5 : 1.8} />
-          <span className="text-[9px] font-semibold" style={{ color: active === t.id ? "#007AFF" : "#8E8E93" }}>{t.label}</span>
+        <button
+          key={t.id}
+          onClick={() => onChange(t.id)}
+          aria-current={active === t.id ? "page" : undefined}
+          className={`flex-1 flex flex-col items-center gap-1 transition-opacity ${elder ? `py-3 ${ELDER_FOCUS_RING}` : "py-1.5"}`}
+        >
+          <t.icon className={elder ? "w-8 h-8 transition-colors" : "w-5 h-5 transition-colors"} style={{ color: active === t.id ? activeColor : inactiveColor }} strokeWidth={active === t.id ? 2.5 : 1.8} />
+          <span className={`font-bold ${elder ? "text-[16px]" : "text-[9px] font-semibold"}`} style={{ color: active === t.id ? activeColor : inactiveColor }}>{t.label}</span>
         </button>
       ))}
     </div>
@@ -857,8 +909,14 @@ function ScanTab() {
 }
 
 // ── Settings Tab ─────────────────────────────────────────────────────────────
-function SettingsTab({ profile, mode, onSave, onOpenTab, onSwitchMode }: {
+function SettingsTab({
+  profile, mode, onSave, onOpenTab, onSwitchMode,
+  modelsResponse, modelsLoading, modelsError, modelSwitching, onSelectModel, onRetryModels, onSaveApiKey,
+}: {
   profile: Profile; mode: Mode; onSave: (p: Profile) => void; onOpenTab: (t: Tab) => void; onSwitchMode: () => void;
+  modelsResponse: ModelsResponse | null; modelsLoading: boolean; modelsError: string | null; modelSwitching: boolean;
+  onSelectModel: (provider: string, model: string) => void; onRetryModels: () => void;
+  onSaveApiKey: (provider: string, apiKey: string) => Promise<void>;
 }) {
   const [name, setName] = useState(profile.name);
   const [age, setAge] = useState(profile.age);
@@ -916,6 +974,67 @@ function SettingsTab({ profile, mode, onSave, onOpenTab, onSwitchMode }: {
           <Cell icon={<ShieldCheck className="w-5 h-5 text-white" />} iconBg="#34C759"
             label="測試同評估" sublabel="LLM準確度／幻覺報告" onPress={() => onOpenTab("eval")} last />
         </Section>
+
+        {/* AI model selection — which chat LLM the whole app talks to (see
+            src/providers.py). Options whose API key isn't configured on the
+            backend are shown but disabled, with the env var name, rather than
+            hidden — so it's clear the option exists but needs setup. */}
+        <div className="space-y-1">
+          <p className="text-[13px] font-semibold uppercase px-4 pb-1" style={{ color: "#8E8E93", letterSpacing: "0.04em" }}>
+            AI 模型
+          </p>
+          {modelsLoading && (
+            <div className="bg-card mx-4 rounded-[12px] p-6 text-center" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+              <RefreshCw className="w-5 h-5 mx-auto mb-2 animate-spin" style={{ color: "#007AFF" }} />
+              <p className="text-[13px]" style={{ color: "#8E8E93" }}>載入緊模型清單…</p>
+            </div>
+          )}
+          {!modelsLoading && modelsError && (
+            <div className="bg-card mx-4 rounded-[12px] p-4 text-center" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+              <p className="text-[13px] text-foreground mb-2">{modelsError}</p>
+              <button onClick={onRetryModels} className="text-[13px] font-semibold" style={{ color: "#007AFF" }}>重試</button>
+            </div>
+          )}
+          {!modelsLoading && !modelsError && modelsResponse && (
+            <div className="bg-card mx-4 rounded-[12px] overflow-hidden" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+              {modelsResponse.providers.map((p, pi) => (
+                <div key={p.id} className={pi < modelsResponse.providers.length - 1 ? "border-b" : ""} style={{ borderColor: "rgba(60,60,67,0.12)" }}>
+                  <div className="px-4 pt-3 pb-1 flex items-center justify-between">
+                    <p className="text-[13px] font-semibold text-foreground">{p.label}</p>
+                    {!p.available && p.needs_key && (
+                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full" style={{ color: "#FF9500", backgroundColor: "#FF950018" }}>
+                        未設定 {p.needs_key}
+                      </span>
+                    )}
+                  </div>
+                  {!p.available && p.needs_key && (
+                    <ApiKeyEntry providerId={p.id} needsKey={p.needs_key} onSave={onSaveApiKey} />
+                  )}
+                  {p.models.map(m => {
+                    const active = modelsResponse.current.provider === p.id && modelsResponse.current.model === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        disabled={!p.available || modelSwitching}
+                        onClick={() => onSelectModel(p.id, m.id)}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-left disabled:opacity-40"
+                      >
+                        <Cpu className="w-4 h-4 flex-shrink-0" style={{ color: active ? "#007AFF" : "#8E8E93" }} />
+                        <span className="flex-1 text-[15px]" style={{ color: active ? "#007AFF" : "var(--foreground)", fontWeight: active ? 600 : 400 }}>
+                          {m.label}
+                        </span>
+                        {active && <CheckCircle2 className="w-4 h-4 flex-shrink-0" style={{ color: "#007AFF" }} />}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="mx-4 text-[12px]" style={{ color: "#8E8E93" }}>
+            揀選之後，所有對話同「測試同評估」重新運行都會用返呢個模型。API金鑰要喺後台 <code>.env</code> 設定。
+          </p>
+        </div>
 
         {/* Switch to the simplified elderly-user view before handing the phone over */}
         <Section label="使用模式">
@@ -1074,6 +1193,135 @@ function RateBadge({ rate }: { rate: number }) {
   );
 }
 
+// Hallucination-rate pill — inverted coloring from RateBadge (lower = better,
+// see hallucinationRateColor).
+function HallucinationRateBadge({ rate }: { rate: number }) {
+  const color = hallucinationRateColor(rate);
+  return (
+    <span
+      className="text-[13px] font-bold px-2.5 py-1 rounded-full flex-shrink-0"
+      style={{ color, backgroundColor: `${color}1A` }}
+    >
+      {Math.round(rate * 100)}%
+    </span>
+  );
+}
+
+// Expandable "判斷 / 證據 / 理由" (claim / evidence / reasoning) panel shown
+// under every graded case in the Testing tab — not just failures — so a PASS
+// can be audited (what did the model actually claim, and what grounded it),
+// not just trusted at face value.
+function ClaimEvidenceReasoning({
+  claim, evidence, reasoning, latencyMs,
+}: { claim: string; evidence: string; reasoning: string; latencyMs?: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-1.5">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1 text-[12px] font-semibold"
+        style={{ color: "#007AFF" }}
+      >
+        <ChevronDown className="w-3.5 h-3.5 transition-transform" style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }} />
+        判斷、證據同理由
+        {typeof latencyMs === "number" && (
+          <span className="font-normal ml-1" style={{ color: "#8E8E93" }}>· {(latencyMs / 1000).toFixed(1)}s</span>
+        )}
+      </button>
+      {open && (
+        <div className="mt-1.5 space-y-1.5 rounded-[10px] p-2.5" style={{ backgroundColor: "#F2F2F7" }}>
+          <div>
+            <p className="text-[11px] font-bold uppercase" style={{ color: "#8E8E93" }}>判斷 (Claim)</p>
+            <p className="text-[13px] text-foreground leading-snug whitespace-pre-wrap">{claim || "（無）"}</p>
+          </div>
+          <div>
+            <p className="text-[11px] font-bold uppercase" style={{ color: "#8E8E93" }}>證據 (Evidence)</p>
+            <p className="text-[13px] leading-snug whitespace-pre-wrap" style={{ color: "#3C3C43" }}>{evidence || "（無相關資料）"}</p>
+          </div>
+          <div>
+            <p className="text-[11px] font-bold uppercase" style={{ color: "#8E8E93" }}>理由 (Reasoning)</p>
+            <p className="text-[13px] leading-snug whitespace-pre-wrap" style={{ color: "#3C3C43" }}>{reasoning || "（無）"}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Inline API-key entry for a cloud provider (e.g. DeepSeek) that isn't
+// configured yet — lets the user type their own key straight into Settings
+// instead of editing .env on the backend host by hand. The key is masked
+// (type="password") and only ever sent to the backend, which persists it
+// server-side (src/utils.py set_api_key) and never echoes it back — this
+// component never stores or displays it after a successful save.
+function ApiKeyEntry({ providerId, needsKey, onSave }: { providerId: string; needsKey: string; onSave: (provider: string, apiKey: string) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState("");
+  const [show, setShow] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    if (!value.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(providerId, value.trim());
+      setValue("");
+      setOpen(false);
+    } catch (err) {
+      setError("儲存失敗，請檢查金鑰係咪正確同埋後台伺服器有冇連接。");
+      console.error("Failed to save API key", err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <div className="px-4 pb-2.5">
+        <button onClick={() => setOpen(true)} className="flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full" style={{ color: "#007AFF", backgroundColor: "#007AFF18" }}>
+          <KeyRound className="w-3 h-3" />設定金鑰
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-4 pb-3 space-y-2">
+      <div className="flex items-center gap-2">
+        <div className="flex-1 flex items-center rounded-[10px] px-3 py-2" style={{ backgroundColor: "rgba(118,118,128,0.12)" }}>
+          <input
+            type={show ? "text" : "password"}
+            autoComplete="off"
+            spellCheck={false}
+            className="flex-1 bg-transparent text-[14px] text-foreground outline-none placeholder:text-[#8E8E93]"
+            placeholder={needsKey}
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleSave()}
+          />
+          <button onClick={() => setShow(s => !s)} className="flex-shrink-0 ml-1" aria-label={show ? "隱藏金鑰" : "顯示金鑰"}>
+            {show ? <EyeOff className="w-4 h-4" style={{ color: "#8E8E93" }} /> : <Eye className="w-4 h-4" style={{ color: "#8E8E93" }} />}
+          </button>
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={!value.trim() || saving}
+          className="px-3.5 py-2 rounded-[10px] text-[13px] font-semibold text-white disabled:opacity-40 flex-shrink-0"
+          style={{ backgroundColor: "#007AFF" }}
+        >
+          {saving ? "儲存緊…" : "儲存"}
+        </button>
+        <button onClick={() => { setOpen(false); setValue(""); setError(null); }} className="flex-shrink-0" aria-label="取消">
+          <X className="w-4 h-4" style={{ color: "#8E8E93" }} />
+        </button>
+      </div>
+      {error && <p className="text-[12px]" style={{ color: "#FF3B30" }}>{error}</p>}
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [mode, setMode] = useState<Mode | null>(null);
@@ -1101,6 +1349,16 @@ export default function App() {
   const [evalReport, setEvalReport] = useState<EvalReport | null>(null);
   const [evalLoading, setEvalLoading] = useState(false);
   const [evalError, setEvalError] = useState<string | null>(null);
+  const [ocrReport, setOcrReport] = useState<OcrEvalReport | null>(null);
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const [hallucinationReport, setHallucinationReport] = useState<HallucinationReport | null>(null);
+  const [hallucinationLoading, setHallucinationLoading] = useState(false);
+  const [hallucinationError, setHallucinationError] = useState<string | null>(null);
+  const [modelsResponse, setModelsResponse] = useState<ModelsResponse | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [modelSwitching, setModelSwitching] = useState(false);
   const [activeAlarm, setActiveAlarm] = useState<(typeof medications)[number] | null>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognition | null>(null);
@@ -1214,9 +1472,77 @@ export default function App() {
     }
   }
 
+  async function loadOcrReport() {
+    setOcrLoading(true);
+    setOcrError(null);
+    try {
+      setOcrReport(await getOcrEvalReport());
+    } catch (err) {
+      setOcrError("未有OCR CER報告。請喺後台專案根目錄執行 `python -m eval.ocr_cer`，然後再撳「重新整理」。");
+      console.error("Failed to load OCR eval report", err);
+    } finally {
+      setOcrLoading(false);
+    }
+  }
+
+  async function loadHallucinationReport() {
+    setHallucinationLoading(true);
+    setHallucinationError(null);
+    try {
+      setHallucinationReport(await getHallucinationReport());
+    } catch (err) {
+      setHallucinationError(
+        "未有100條問題嘅幻覺風險報告。請喺後台專案根目錄執行 `python -m eval.hallucination_csv_eval`，然後再撳「重新整理」。"
+      );
+      console.error("Failed to load hallucination CSV report", err);
+    } finally {
+      setHallucinationLoading(false);
+    }
+  }
+
+  async function loadModels() {
+    setModelsLoading(true);
+    setModelsError(null);
+    try {
+      setModelsResponse(await getModels());
+    } catch (err) {
+      setModelsError("未能連接後台伺服器，未能載入AI模型清單。");
+      console.error("Failed to load models", err);
+    } finally {
+      setModelsLoading(false);
+    }
+  }
+
+  async function handleSelectModel(provider: string, model: string) {
+    setModelSwitching(true);
+    try {
+      const current = await selectModel(provider, model);
+      setModelsResponse(prev => (prev ? { ...prev, current } : prev));
+    } catch (err) {
+      console.error("Failed to switch model", err);
+      window.alert("切換模型失敗，請檢查後台伺服器同埋對應嘅API金鑰有冇設定好。");
+    } finally {
+      setModelSwitching(false);
+    }
+  }
+
+  async function handleSaveApiKey(provider: string, apiKey: string) {
+    const updated = await setProviderApiKey(provider, apiKey);
+    setModelsResponse(updated);
+  }
+
   useEffect(() => {
     if (tab === "eval" && !evalReport && !evalLoading) {
       loadEvalReport();
+    }
+    if (tab === "eval" && !ocrReport && !ocrLoading) {
+      loadOcrReport();
+    }
+    if (tab === "eval" && !hallucinationReport && !hallucinationLoading) {
+      loadHallucinationReport();
+    }
+    if (tab === "settings" && !modelsResponse && !modelsLoading) {
+      loadModels();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
@@ -1264,6 +1590,11 @@ export default function App() {
     }
   }
 
+  // 長者用家模式 (patient mode) — the chat screen redesign below (≥24px text,
+  // WCAG AA/AAA contrast, ≥48px touch targets) only applies here; carer mode
+  // keeps the original compact/dense design since it's not the audience with
+  // the accessibility need.
+  const elderChat = mode === "user";
   const takenCount = Object.values(taken).filter(Boolean).length;
   const latestBP = bpData[bpData.length - 1];
   const latestGlucose = glucoseData[glucoseData.length - 1];
@@ -1508,38 +1839,47 @@ export default function App() {
                 </>
               )}
 
-              {/* ── 對話 ── */}
+              {/* ── 對話 ──
+                  長者用家模式 (elderChat) redesign: ≥24px text throughout,
+                  WCAG AA/AAA-contrast colours (see ELDER_BLUE/ELDER_RED/
+                  ELDER_MUTED above), ≥48px touch targets, and visible focus
+                  rings. Carer mode is untouched (elderChat is false there). */}
               {tab === "chat" && (
                 <>
-                  <NavBar title="健康助理" />
-                  <div className="flex-1 overflow-y-auto px-3 py-4 space-y-3" style={{ scrollbarWidth: "none" }}>
+                  <NavBar title="健康助理" elder={elderChat} />
+                  <div className={`flex-1 overflow-y-auto ${elderChat ? "px-4 py-5 space-y-5" : "px-3 py-4 space-y-3"}`} style={{ scrollbarWidth: "none" }}>
                     {messages.map(m => (
-                      <div key={m.id} className="flex flex-col gap-1.5">
+                      <div key={m.id} className="flex flex-col gap-2">
                         <div className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} items-end gap-2`}>
                           {m.role === "agent" && (
-                            <div className="w-8 h-8 rounded-full bg-[#007AFF] flex items-center justify-center flex-shrink-0 mb-1">
-                              <Activity className="w-4 h-4 text-white" />
+                            <div className={`rounded-full flex items-center justify-center flex-shrink-0 mb-1 ${elderChat ? "w-12 h-12" : "w-8 h-8"}`}
+                              style={{ backgroundColor: elderChat ? ELDER_BLUE : "#007AFF" }}>
+                              <Activity className={elderChat ? "w-7 h-7 text-white" : "w-4 h-4 text-white"} />
                             </div>
                           )}
-                          <div className={`max-w-[78%] px-4 py-2.5 rounded-[18px] text-[16px] leading-relaxed ${m.role === "user" ? "bg-[#007AFF] text-white rounded-br-[4px]" : "bg-card text-foreground rounded-bl-[4px]"}`}
-                            style={m.role === "agent" ? { boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" } : {}}>
+                          <div
+                            className={`rounded-[18px] leading-relaxed ${elderChat ? "max-w-[88%] px-5 py-4 text-[24px] leading-[1.5]" : "max-w-[78%] px-4 py-2.5 text-[16px]"} ${m.role === "user" ? "text-white rounded-br-[4px]" : "bg-card text-foreground rounded-bl-[4px]"}`}
+                            style={{
+                              backgroundColor: m.role === "user" ? (elderChat ? ELDER_BLUE : "#007AFF") : undefined,
+                              boxShadow: m.role === "agent" ? "0 0 0 0.5px rgba(60,60,67,0.18)" : undefined,
+                            }}>
                             {m.text}
                           </div>
                         </div>
                         {m.role === "agent" && m.isEmergency && (
-                          <div className="flex items-center gap-2 pl-10">
+                          <div className={`flex flex-wrap items-center gap-3 ${elderChat ? "pl-14" : "pl-10"}`}>
                             <a href="tel:999"
-                              className="flex items-center gap-1.5 px-3.5 py-2 rounded-full text-[13px] font-semibold text-white"
-                              style={{ backgroundColor: "#FF3B30" }}>
-                              <Phone className="w-3.5 h-3.5" />致電999
+                              className={`flex items-center gap-2 rounded-full font-bold text-white ${elderChat ? `px-6 py-4 text-[22px] ${ELDER_FOCUS_RING}` : "px-3.5 py-2 text-[13px] font-semibold"}`}
+                              style={{ backgroundColor: elderChat ? ELDER_RED : "#FF3B30" }}>
+                              <Phone className={elderChat ? "w-6 h-6" : "w-3.5 h-3.5"} />致電999
                             </a>
                             <button
                               onClick={() => {
                                 setSos(true);
                                 alertCaregiver("對話中偵測到緊急徵狀，使用者可能需要協助").catch(err => console.error("Failed to notify caregiver", err));
                               }}
-                              className="flex items-center gap-1.5 px-3.5 py-2 rounded-full text-[13px] font-semibold"
-                              style={{ backgroundColor: "#FF3B301A", color: "#FF3B30" }}>
+                              className={`flex items-center gap-2 rounded-full font-bold ${elderChat ? `px-6 py-4 text-[22px] ${ELDER_FOCUS_RING}` : "px-3.5 py-2 text-[13px] font-semibold"}`}
+                              style={elderChat ? { backgroundColor: "#B0002018", color: ELDER_RED } : { backgroundColor: "#FF3B301A", color: "#FF3B30" }}>
                               尋求緊急協助
                             </button>
                           </div>
@@ -1548,12 +1888,15 @@ export default function App() {
                     ))}
                     {typing && (
                       <div className="flex items-end gap-2">
-                        <div className="w-8 h-8 rounded-full bg-[#007AFF] flex items-center justify-center">
-                          <Activity className="w-4 h-4 text-white" />
+                        <div className={`rounded-full flex items-center justify-center ${elderChat ? "w-12 h-12" : "w-8 h-8"}`} style={{ backgroundColor: elderChat ? ELDER_BLUE : "#007AFF" }}>
+                          <Activity className={elderChat ? "w-7 h-7 text-white" : "w-4 h-4 text-white"} />
                         </div>
-                        <div className="bg-card px-4 py-3 rounded-[18px] rounded-bl-[4px]" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
-                          <div className="flex gap-1 items-center h-5">
-                            {[0, 1, 2].map(i => <span key={i} className="w-2 h-2 bg-[#8E8E93] rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />)}
+                        <div className={`bg-card rounded-[18px] rounded-bl-[4px] ${elderChat ? "px-5 py-4" : "px-4 py-3"}`} style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                          <div className={`flex gap-1.5 items-center ${elderChat ? "h-6" : "h-5"}`}>
+                            {[0, 1, 2].map(i => (
+                              <span key={i} className={`rounded-full animate-bounce ${elderChat ? "w-3 h-3" : "w-2 h-2"}`}
+                                style={{ backgroundColor: elderChat ? ELDER_MUTED : "#8E8E93", animationDelay: `${i * 0.15}s` }} />
+                            ))}
                           </div>
                         </div>
                       </div>
@@ -1563,13 +1906,16 @@ export default function App() {
 
                   <div className="flex-shrink-0 flex flex-col items-center bg-card/80 backdrop-blur-xl border-t pb-3"
                     style={{ borderColor: "rgba(60,60,67,0.18)", WebkitBackdropFilter: "blur(20px)" }}>
-                    <div className="w-full px-3 pt-3 pb-2 flex gap-2 overflow-x-auto" style={{ scrollbarWidth: "none" }}>
+                    <div className={`w-full flex overflow-x-auto ${elderChat ? "px-4 pt-4 pb-3 gap-3" : "px-3 pt-3 pb-2 gap-2"}`} style={{ scrollbarWidth: "none" }}>
                       {["血壓偏高", "血糖過低", "腳部麻痺", "忘記食藥"].map(q => (
-                        <button key={q} onClick={() => send(q)} className="flex-shrink-0 px-4 py-1.5 rounded-full border text-[13px] font-medium text-[#007AFF]"
-                          style={{ borderColor: "#007AFF", backgroundColor: "rgba(0,122,255,0.06)" }}>{q}</button>
+                        <button key={q} onClick={() => send(q)}
+                          className={`flex-shrink-0 rounded-full border font-bold ${elderChat ? `px-6 py-3.5 text-[22px] ${ELDER_FOCUS_RING}` : "px-4 py-1.5 text-[13px] font-medium"}`}
+                          style={elderChat ? { borderColor: ELDER_BLUE, borderWidth: 2, backgroundColor: "#0051D40F", color: ELDER_BLUE } : { borderColor: "#007AFF", backgroundColor: "rgba(0,122,255,0.06)", color: "#007AFF" }}>
+                          {q}
+                        </button>
                       ))}
                     </div>
-                    <div className="flex flex-col items-center py-4 gap-2">
+                    <div className={`flex flex-col items-center gap-2 ${elderChat ? "py-5" : "py-4"}`}>
                       <div className="relative flex items-center justify-center">
                         {listening && (
                           <>
@@ -1578,27 +1924,34 @@ export default function App() {
                           </>
                         )}
                         <button onClick={toggleMic}
-                          className="relative w-20 h-20 rounded-full flex items-center justify-center transition-all duration-200 active:scale-95"
+                          aria-label={listening ? "停止語音輸入" : "開始語音輸入"}
+                          className={`relative rounded-full flex items-center justify-center transition-all duration-200 active:scale-95 ${elderChat ? `w-24 h-24 ${ELDER_FOCUS_RING}` : "w-20 h-20"}`}
                           style={{
-                            background: listening ? "linear-gradient(145deg,#FF3B30,#FF2D55)" : "linear-gradient(145deg,#007AFF,#5AC8FA)",
+                            background: listening
+                              ? (elderChat ? `linear-gradient(145deg,${ELDER_RED},#8A0018)` : "linear-gradient(145deg,#FF3B30,#FF2D55)")
+                              : (elderChat ? `linear-gradient(145deg,${ELDER_BLUE},#003D99)` : "linear-gradient(145deg,#007AFF,#5AC8FA)"),
                             boxShadow: listening ? "0 8px 32px rgba(255,59,48,0.45)" : "0 8px 32px rgba(0,122,255,0.40)",
                           }}>
-                          {listening ? <MicOff className="w-9 h-9 text-white" /> : <Mic className="w-9 h-9 text-white" />}
+                          {listening
+                            ? <MicOff className={elderChat ? "w-12 h-12 text-white" : "w-9 h-9 text-white"} />
+                            : <Mic className={elderChat ? "w-12 h-12 text-white" : "w-9 h-9 text-white"} />}
                         </button>
                       </div>
-                      <p className="text-[13px] font-medium" style={{ color: listening ? "#FF3B30" : "#8E8E93" }}>
+                      <p className={`font-bold ${elderChat ? "text-[24px]" : "text-[13px] font-medium"}`} style={{ color: listening ? (elderChat ? ELDER_RED : "#FF3B30") : (elderChat ? ELDER_MUTED : "#8E8E93") }}>
                         {listening ? "聆聽中，輕按停止" : "輕按說話"}
                       </p>
                     </div>
-                    <div className="w-full px-3 flex items-center gap-2">
-                      <div className="flex-1 flex items-center rounded-full px-4 py-2.5" style={{ backgroundColor: "rgba(118,118,128,0.12)" }}>
-                        <input className="flex-1 bg-transparent text-[16px] text-foreground outline-none placeholder:text-[#8E8E93]"
+                    <div className={`w-full flex items-center gap-2 ${elderChat ? "px-4" : "px-3"}`}>
+                      <div className={`flex-1 flex items-center rounded-full ${elderChat ? "px-5 py-4" : "px-4 py-2.5"}`} style={{ backgroundColor: "rgba(118,118,128,0.12)" }}>
+                        <input
+                          className={`flex-1 bg-transparent text-foreground outline-none ${elderChat ? `text-[24px] placeholder:text-[#48484A] ${ELDER_FOCUS_RING}` : "text-[16px] placeholder:text-[#8E8E93]"}`}
                           placeholder={listening ? "聆聽中…" : "或者輸入文字…"} value={input}
                           onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()} />
                       </div>
-                      <button onClick={() => send()} disabled={!input.trim()}
-                        className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 bg-[#007AFF] disabled:opacity-40 transition-opacity">
-                        <Send className="w-4 h-4 text-white" />
+                      <button onClick={() => send()} disabled={!input.trim()} aria-label="傳送"
+                        className={`rounded-full flex items-center justify-center flex-shrink-0 disabled:opacity-40 transition-opacity ${elderChat ? `w-16 h-16 ${ELDER_FOCUS_RING}` : "w-10 h-10"}`}
+                        style={{ backgroundColor: elderChat ? ELDER_BLUE : "#007AFF" }}>
+                        <Send className={elderChat ? "w-7 h-7 text-white" : "w-4 h-4 text-white"} />
                       </button>
                     </div>
                   </div>
@@ -1906,6 +2259,13 @@ export default function App() {
                   onSave={setProfile}
                   onOpenTab={setTab}
                   onSwitchMode={() => { setMode("user"); setTab("home"); }}
+                  modelsResponse={modelsResponse}
+                  modelsLoading={modelsLoading}
+                  modelsError={modelsError}
+                  modelSwitching={modelSwitching}
+                  onSelectModel={handleSelectModel}
+                  onRetryModels={loadModels}
+                  onSaveApiKey={handleSaveApiKey}
                 />
               )}
 
@@ -1915,10 +2275,13 @@ export default function App() {
                   <NavBar title="測試同評估" large />
                   <div className="flex-1 overflow-y-auto py-3 space-y-6" style={{ scrollbarWidth: "none" }}>
                     <p className="mx-4 text-[13px]" style={{ color: "#8E8E93" }}>
-                      下面嘅結果嚟自 <code>eval/evaluate.py</code> 對真實 Ollama 模型嘅測試，用嚟檢查回答有冇根據官方指引、
-                      有冇喺急症徵狀時提示999，同埋有冇「亂up」答案（hallucination）。
+                      下面有三份報告：<code>eval/evaluate.py</code>（20條指引問題，準確度／安全／亂up）、
+                      <code>eval/ocr_cer.py</code>（OCR文字辨識準確度）、同埋
+                      <code>eval/hallucination_csv_eval.py</code>（100條幻覺風險壓力測試）。
+                      每個測試結果都附有「判斷／證據／理由」，可以撳開睇。
                     </p>
 
+                    {/* ══ 1. QA 準確度／安全／幻覺測試 ══ */}
                     {evalLoading && (
                       <div className="mx-4 bg-card rounded-[16px] p-8 text-center" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
                         <RefreshCw className="w-6 h-6 mx-auto mb-3 animate-spin" style={{ color: "#007AFF" }} />
@@ -1953,7 +2316,10 @@ export default function App() {
                               {Math.round(evalReport.summary.overall_pass_rate * 100)}%
                             </p>
                             <p className="text-white/70 text-[13px] mt-1">
-                              {evalReport.cases.length} 條測試問題 · 每條重複 {evalReport.repeat} 次
+                              {evalReport.cases.length} 條測試問題 · 每條重複 {evalReport.repeat} 次 · 模型 {evalReport.provider}/{evalReport.model}
+                            </p>
+                            <p className="text-white/70 text-[13px]">
+                              平均回應時間 {(evalReport.summary.mean_latency_ms / 1000).toFixed(1)}s
                             </p>
                           </div>
                           <ShieldCheck className="w-12 h-12 text-white/80" />
@@ -1985,10 +2351,11 @@ export default function App() {
                         </Section>
 
                         {/* Individual cases */}
-                        <Section label="個別測試結果">
+                        <Section label="個別測試結果 (20條)">
                           {evalReport.cases.map((c, i, arr) => {
                             const passed = c.pass_rate === 1;
                             const failedRuns = c.runs.filter(r => !r.pass);
+                            const firstRun = c.runs[0];
                             return (
                               <div
                                 key={c.id}
@@ -2009,6 +2376,14 @@ export default function App() {
                                         ⚠ {reason}
                                       </p>
                                     ))}
+                                    {firstRun && (
+                                      <ClaimEvidenceReasoning
+                                        claim={firstRun.claim}
+                                        evidence={firstRun.evidence}
+                                        reasoning={firstRun.reasoning}
+                                        latencyMs={c.mean_latency_ms}
+                                      />
+                                    )}
                                   </div>
                                   <RateBadge rate={c.pass_rate} />
                                 </div>
@@ -2022,6 +2397,159 @@ export default function App() {
                           className="mx-4 flex items-center justify-center gap-2 py-3 rounded-[14px] text-[#007AFF] text-[15px] font-semibold"
                           style={{ backgroundColor: "#F2F2F7" }}
                         >
+                          <RefreshCw className="w-4 h-4" />
+                          重新整理
+                        </button>
+                      </>
+                    )}
+
+                    {/* ══ 2. OCR 文字辨識準確度 (CER) ══ */}
+                    <div className="mx-4 h-px" style={{ backgroundColor: "rgba(60,60,67,0.12)" }} />
+                    <p className="mx-4 text-[17px] font-bold text-foreground -mb-2">OCR 文字辨識準確度 (CER)</p>
+
+                    {ocrLoading && (
+                      <div className="mx-4 bg-card rounded-[16px] p-8 text-center" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                        <RefreshCw className="w-6 h-6 mx-auto mb-3 animate-spin" style={{ color: "#007AFF" }} />
+                        <p className="text-[15px]" style={{ color: "#8E8E93" }}>載入緊OCR報告…</p>
+                      </div>
+                    )}
+
+                    {!ocrLoading && ocrError && (
+                      <div className="mx-4 bg-card rounded-[16px] p-6 text-center" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                        <AlertTriangle className="w-8 h-8 mx-auto mb-3" style={{ color: "#FF9500" }} />
+                        <p className="text-[15px] text-foreground mb-4">{ocrError}</p>
+                        <button onClick={loadOcrReport} className="px-6 py-3 rounded-[14px] text-[#007AFF] text-[15px] font-semibold" style={{ backgroundColor: "#F2F2F7" }}>
+                          重新整理
+                        </button>
+                      </div>
+                    )}
+
+                    {!ocrLoading && !ocrError && ocrReport && (
+                      <>
+                        <div className="mx-4 rounded-[16px] p-5 flex items-center justify-between" style={{ backgroundColor: rateColor(ocrReport.summary.mean_accuracy) }}>
+                          <div>
+                            <p className="text-white/70 text-[13px] font-medium">平均準確度 (1 − CER)</p>
+                            <p className="text-white text-[34px] font-bold leading-none mt-1">
+                              {Math.round(ocrReport.summary.mean_accuracy * 100)}%
+                            </p>
+                            <p className="text-white/70 text-[13px] mt-1">
+                              {ocrReport.summary.case_count} 份模擬照片文件 · 模型 {ocrReport.model}
+                            </p>
+                            <p className="text-white/70 text-[13px]">CER = 編輯距離 ÷ 參考文字長度，數值愈低愈準</p>
+                          </div>
+                          <ScanText className="w-12 h-12 text-white/80" />
+                        </div>
+
+                        <Section label="各文件類型 CER">
+                          {ocrReport.cases.map((c, i, arr) => (
+                            <Cell
+                              key={c.id}
+                              label={c.label}
+                              sublabel={`CER ${c.cer.toFixed(3)}`}
+                              right={<RateBadge rate={c.accuracy} />}
+                              last={i === arr.length - 1}
+                            />
+                          ))}
+                        </Section>
+
+                        <button onClick={loadOcrReport} className="mx-4 flex items-center justify-center gap-2 py-3 rounded-[14px] text-[#007AFF] text-[15px] font-semibold" style={{ backgroundColor: "#F2F2F7" }}>
+                          <RefreshCw className="w-4 h-4" />
+                          重新整理
+                        </button>
+                      </>
+                    )}
+
+                    {/* ══ 3. 100條幻覺風險壓力測試 ══ */}
+                    <div className="mx-4 h-px" style={{ backgroundColor: "rgba(60,60,67,0.12)" }} />
+                    <p className="mx-4 text-[17px] font-bold text-foreground -mb-2">幻覺風險壓力測試 (100條問題)</p>
+
+                    {hallucinationLoading && (
+                      <div className="mx-4 bg-card rounded-[16px] p-8 text-center" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                        <RefreshCw className="w-6 h-6 mx-auto mb-3 animate-spin" style={{ color: "#007AFF" }} />
+                        <p className="text-[15px]" style={{ color: "#8E8E93" }}>載入緊幻覺風險報告…</p>
+                      </div>
+                    )}
+
+                    {!hallucinationLoading && hallucinationError && (
+                      <div className="mx-4 bg-card rounded-[16px] p-6 text-center" style={{ boxShadow: "0 0 0 0.5px rgba(60,60,67,0.18)" }}>
+                        <AlertTriangle className="w-8 h-8 mx-auto mb-3" style={{ color: "#FF9500" }} />
+                        <p className="text-[15px] text-foreground mb-4">{hallucinationError}</p>
+                        <button onClick={loadHallucinationReport} className="px-6 py-3 rounded-[14px] text-[#007AFF] text-[15px] font-semibold" style={{ backgroundColor: "#F2F2F7" }}>
+                          重新整理
+                        </button>
+                      </div>
+                    )}
+
+                    {!hallucinationLoading && !hallucinationError && hallucinationReport && (
+                      <>
+                        <div
+                          className="mx-4 rounded-[16px] p-5 flex items-center justify-between"
+                          style={{ backgroundColor: hallucinationReport.summary.hallucination_rate !== null ? hallucinationRateColor(hallucinationReport.summary.hallucination_rate) : "#8E8E93" }}
+                        >
+                          <div>
+                            <p className="text-white/70 text-[13px] font-medium">幻覺率 (目標 &lt;5%)</p>
+                            <p className="text-white text-[34px] font-bold leading-none mt-1">
+                              {hallucinationReport.summary.hallucination_rate !== null ? `${Math.round(hallucinationReport.summary.hallucination_rate * 100)}%` : "—"}
+                            </p>
+                            <p className="text-white/70 text-[13px] mt-1">
+                              {hallucinationReport.summary.graded_count}/{hallucinationReport.summary.question_count} 條已評審 · 模型 {hallucinationReport.provider}/{hallucinationReport.model}
+                            </p>
+                            <p className="text-white/70 text-[13px]">
+                              評審員：{hallucinationReport.judge_provider}/{hallucinationReport.judge_model}
+                            </p>
+                            <p className="text-white/70 text-[13px]">
+                              平均 {(hallucinationReport.summary.mean_latency_ms / 1000).toFixed(1)}s · P95 {(hallucinationReport.summary.p95_latency_ms / 1000).toFixed(1)}s
+                            </p>
+                          </div>
+                          <AlertTriangle className="w-12 h-12 text-white/80" />
+                        </div>
+
+                        <Section label="各類別幻覺率">
+                          {Object.entries(hallucinationReport.summary.hallucination_rate_by_category).map(([cat, rate], i, arr) => (
+                            <Cell
+                              key={cat}
+                              label={hallucinationCategoryLabels[cat] ?? cat}
+                              right={<HallucinationRateBadge rate={rate} />}
+                              last={i === arr.length - 1}
+                            />
+                          ))}
+                        </Section>
+
+                        <Section label="個別問題結果 (100條)">
+                          {hallucinationReport.cases.map((c, i, arr) => (
+                            <div
+                              key={c.id}
+                              className={`px-4 py-3 ${i < arr.length - 1 ? "border-b" : ""}`}
+                              style={{ borderColor: "rgba(60,60,67,0.12)" }}
+                            >
+                              <div className="flex items-start gap-2">
+                                {c.hallucinated === null
+                                  ? <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: "#8E8E93" }} />
+                                  : c.hallucinated
+                                    ? <XCircle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: "#FF3B30" }} />
+                                    : <CheckCircle2 className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: "#34C759" }} />}
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-[15px] text-foreground leading-snug">{c.question}</p>
+                                  <p className="text-[12px] mt-0.5" style={{ color: "#8E8E93" }}>
+                                    {hallucinationCategoryLabels[c.category] ?? c.category} · {c.hallucination_risk_focus}
+                                  </p>
+                                  <ClaimEvidenceReasoning claim={c.claim} evidence={c.evidence} reasoning={c.reasoning} latencyMs={c.latency_ms} />
+                                </div>
+                                <span
+                                  className="text-[12px] font-bold px-2 py-1 rounded-full flex-shrink-0"
+                                  style={{
+                                    color: c.hallucinated === null ? "#8E8E93" : c.hallucinated ? "#FF3B30" : "#34C759",
+                                    backgroundColor: c.hallucinated === null ? "#8E8E9318" : c.hallucinated ? "#FF3B3018" : "#34C75918",
+                                  }}
+                                >
+                                  {c.hallucinated === null ? "未評審" : c.hallucinated ? "亂up" : "安全"}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </Section>
+
+                        <button onClick={loadHallucinationReport} className="mx-4 flex items-center justify-center gap-2 py-3 rounded-[14px] text-[#007AFF] text-[15px] font-semibold" style={{ backgroundColor: "#F2F2F7" }}>
                           <RefreshCw className="w-4 h-4" />
                           重新整理
                         </button>
