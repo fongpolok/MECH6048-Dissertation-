@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import time
 from pathlib import Path
 
 from src.agent import get_medical_agent
@@ -39,7 +40,15 @@ def load_testset(path: Path) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+MAX_EVIDENCE_CHARS = 600  # keep the report readable — full context is in result["context"] if needed
+
+
 def grade(case: dict, result: dict) -> dict:
+    """Returns pass/fail plus three fields the Testing tab surfaces for every
+    case, not just failures: what the model asserted (claim), what guideline
+    material was actually retrieved to ground it (evidence), and why the
+    check passed or failed (reasoning) — so a reviewer can audit a PASS, not
+    just be told to trust it."""
     answer = result["answer"]
     tool_calls = result.get("tool_calls", [])
     reasons = []
@@ -74,17 +83,59 @@ def grade(case: dict, result: dict) -> dict:
             else:
                 reasons.append(f"expected tool {expect_tool!r} was not called")
 
-    return {"pass": ok, "reasons": reasons}
+    if ok:
+        checks_run = []
+        if must_include_any:
+            checks_run.append(f"answer contains one of {must_include_any}")
+        if case.get("must_include_all"):
+            checks_run.append("answer contains all required phrases")
+        if case.get("must_not_include_any"):
+            checks_run.append("answer avoids all forbidden phrases")
+        if expect_tool:
+            checks_run.append(f"tool {expect_tool!r} was actually called before any logging claim")
+        reasoning = "PASS — " + "; ".join(checks_run) if checks_run else "PASS — no checks defined for this case"
+    else:
+        reasoning = "FAIL — " + "; ".join(reasons)
+
+    evidence = result.get("context", "")
+    if len(evidence) > MAX_EVIDENCE_CHARS:
+        evidence = evidence[:MAX_EVIDENCE_CHARS] + "…"
+
+    return {
+        "pass": ok,
+        "reasons": reasons,
+        "claim": answer,
+        "evidence": evidence,
+        "reasoning": reasoning,
+    }
 
 
 def run_case(agent, profile: dict, case: dict, repeat: int) -> dict:
     runs = []
     for _ in range(repeat):
+        start = time.perf_counter()
         result = agent.ask(case["question"], profile)
+        latency_ms = round((time.perf_counter() - start) * 1000)
         verdict = grade(case, result)
-        runs.append({"answer": result["answer"], "sources": result["sources"], "tool_calls": result["tool_calls"], **verdict})
+        runs.append(
+            {
+                "answer": result["answer"],
+                "sources": result["sources"],
+                "tool_calls": result["tool_calls"],
+                "latency_ms": latency_ms,
+                **verdict,
+            }
+        )
     pass_rate = sum(r["pass"] for r in runs) / len(runs)
-    return {"id": case["id"], "category": case["category"], "question": case["question"], "pass_rate": pass_rate, "runs": runs}
+    mean_latency_ms = round(statistics.mean(r["latency_ms"] for r in runs))
+    return {
+        "id": case["id"],
+        "category": case["category"],
+        "question": case["question"],
+        "pass_rate": pass_rate,
+        "mean_latency_ms": mean_latency_ms,
+        "runs": runs,
+    }
 
 
 def summarize(case_results: list[dict]) -> dict:
@@ -97,11 +148,13 @@ def summarize(case_results: list[dict]) -> dict:
     hallucination_categories = ["hallucination_trap", "tool_claim_consistency"]
     hallucination_rates = [r for cr in case_results if cr["category"] in hallucination_categories for r in [cr["pass_rate"]]]
     hallucination_pass_rate = round(statistics.mean(hallucination_rates), 3) if hallucination_rates else None
+    mean_latency_ms = round(statistics.mean(cr["mean_latency_ms"] for cr in case_results)) if case_results else 0
 
     return {
         "overall_pass_rate": round(overall, 3),
         "by_category": category_summary,
         "hallucination_related_pass_rate": hallucination_pass_rate,
+        "mean_latency_ms": mean_latency_ms,
     }
 
 
@@ -110,13 +163,15 @@ def main():
     parser.add_argument("--testset", type=Path, default=DEFAULT_TESTSET)
     parser.add_argument("--repeat", type=int, default=1, help="Runs per question, to measure consistency under sampling.")
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--provider", type=str, default=None, help="Override the persisted model selection, e.g. anthropic.")
+    parser.add_argument("--model", type=str, default=None, help="Override the persisted model selection, e.g. claude-opus-4-8.")
     args = parser.parse_args()
 
     cases = load_testset(args.testset)
     profile = load_profile()
-    agent = get_medical_agent()
+    agent = get_medical_agent(args.provider, args.model)
 
-    print(f"Running {len(cases)} test cases x{args.repeat} against {args.testset.name}...\n")
+    print(f"Running {len(cases)} test cases x{args.repeat} against {args.testset.name} on {agent.provider}/{agent.model}...\n")
 
     case_results = []
     for case in cases:
@@ -141,10 +196,13 @@ def main():
     if summary["hallucination_related_pass_rate"] is not None:
         print(f"\nHallucination-related pass rate: {summary['hallucination_related_pass_rate']:.0%}")
         print("(hallucination_trap + tool_claim_consistency categories combined)")
+    print(f"Mean latency: {summary['mean_latency_ms']} ms")
 
     report = {
         "testset": str(args.testset),
         "repeat": args.repeat,
+        "provider": agent.provider,
+        "model": agent.model,
         "summary": summary,
         "cases": case_results,
     }
